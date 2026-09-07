@@ -2844,7 +2844,7 @@
       }
 
       draw(c) {
-        c.save();
+        c.save(); // Scope general del duende; se restaura al final de draw().
 
         if (this.consumedTraits.scout > 0) {
           for (const g of this.ghostTrails) {
@@ -2888,8 +2888,9 @@
           strokeColor = '#c084fc';
         }
 
-        if (this.isMutated || this.isTransforming) {
-          c.save();
+        const mutationRenderScope = this.isMutated || this.isTransforming;
+        if (mutationRenderScope) {
+          c.save(); // Scope de brillo de mutación, incluido el panel F3.
           if (this.consumedTraits.scout > 0) { c.shadowBlur = 12; c.shadowColor = '#34d399'; }
           if (this.consumedTraits.warrior > 0) { c.shadowBlur = 14; c.shadowColor = '#f43f5e'; }
           if (this.consumedTraits.brute > 0) { c.shadowBlur = 16; c.shadowColor = '#a855f7'; }
@@ -3044,7 +3045,10 @@
           }
         }
 
-        c.restore();
+        if (mutationRenderScope) {
+          c.restore(); // Cierra el save() condicional del brillo de mutación.
+        }
+        c.restore(); // Cierra el save() general de Duende.draw().
       }
     }
 
