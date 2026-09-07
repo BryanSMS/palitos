@@ -355,24 +355,34 @@
     const MAX_STEPS_PER_FRAME = 120;
     let simulationTime = performance.now();
     const scheduledActions = [];
+    let currentRunId = 0;
 
     function scheduleSimulationAction(callback, delay) {
-      scheduledActions.push({ callback, due: simulationTime + delay });
+      if (gameState !== 'PLAYING') return;
+      scheduledActions.push({ callback, due: simulationTime + delay, runId: currentRunId });
     }
 
     function updateScheduledActions() {
+      if (gameState !== 'PLAYING') {
+        scheduledActions.length = 0;
+        return;
+      }
       const ready = scheduledActions.filter(action => action.due <= simulationTime);
       for (const action of ready) {
         const index = scheduledActions.indexOf(action);
         if (index !== -1) {
           scheduledActions.splice(index, 1);
-          action.callback();
+          if (action.runId === currentRunId && gameState === 'PLAYING') action.callback();
         }
       }
     }
 
     // --- ESTADO GENERAL DE LA PARTIDA ---
     let gameState = 'PRE_GAME'; // PRE_GAME, ROUND_INTRO, PLAYING, ROUND_CLEAR, GAME_OVER, VICTORY
+
+    function isRunFinished() {
+      return gameState === 'GAME_OVER' || gameState === 'VICTORY';
+    }
 
     // --- ESTADÍSTICAS GLOBALES DE LA PARTIDA ---
     const RunStats = {
@@ -395,7 +405,7 @@
       },
 
       getFormattedTime(now) {
-        const elapsed = (this.endTime > 0 ? this.endTime : (this.startTime > 0 ? now - this.startTime : 0)) / 1000;
+        const elapsed = this.startTime > 0 ? Math.max(0, (this.endTime > 0 ? this.endTime : now) - this.startTime) / 1000 : 0;
         const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
         const secs = Math.floor(elapsed % 60).toString().padStart(2, '0');
         return `${mins}:${secs}`;
@@ -733,6 +743,7 @@
             const pendingTransform = duendes.some(d => d.isTransforming || d.isDevouring);
             if (!pendingTransform) {
               gameState = 'ROUND_CLEAR';
+              clearRoundCombat();
               this.roundClearTimer = 3000;
               this.healGivenThisClear = false;
             }
@@ -755,9 +766,7 @@
           this.roundClearTimer -= dt;
           if (this.roundClearTimer <= 0) {
             if (this.currentRoundIndex + 1 >= ROUND_CONFIG.length) {
-              gameState = 'VICTORY';
-              RunStats.endTime = simulationTime;
-              showEndGameModal(true);
+              finishRun(true);
             } else {
               this.initRound(this.currentRoundIndex + 1);
             }
@@ -791,6 +800,8 @@
         this.currentRoundIndex = 0;
         this.spawnQueue = [];
         this.spawnTimer = 0;
+        this.spawnInterval = 1200;
+        this.spawnSideToggle = false;
         this.roundIntroTimer = 0;
         this.roundClearTimer = 0;
         this.healGivenThisClear = false;
@@ -850,7 +861,7 @@
           c.ellipse(this.x, this.y - 2, 22 * this.scale + pulse * 4, 7 * this.scale + pulse * 2, 0, 0, Math.PI * 2);
           c.stroke();
 
-          if (Math.random() < 0.08) {
+          if (!isRunFinished() && Math.random() < 0.08) {
             activeVisuals.push(new WispParticle(this.x + (Math.random() - 0.5) * 18 * this.scale, this.y - 4, '#c084fc'));
           }
         }
@@ -1203,17 +1214,81 @@
         { x: width * 0.44, y: groundY - 340, w: 160, h: 12 }
       ];
 
-      obstacles = [
+      const resizedObstacles = [
         { x: width * 0.32, y: groundY - 120, w: 26, h: 120, hp: 60, maxHp: 60, destructible: true, broken: false, crackLevel: 0 },
         { x: width * 0.68, y: groundY - 130, w: 26, h: 130, hp: 60, maxHp: 60, destructible: true, broken: false, crackLevel: 0 }
       ];
+      // Conservar daño e identidad: los enemigos pueden tener targetObstacle.
+      obstacles = resizedObstacles.map((geometry, index) => {
+        const existing = obstacles[index];
+        if (!existing) return geometry;
+        Object.assign(existing, { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h });
+        return existing;
+      });
     }
 
     function resize() {
+      const oldWidth = width;
+      const oldHeight = height;
+      const oldGroundY = groundY;
+      const oldPlatforms = platforms;
       width = canvas.width = window.innerWidth;
       height = canvas.height = window.innerHeight;
       groundY = height - 55;
       setupLevel();
+
+      // La primera llamada solo crea el mapa: player/keys aún no existen.
+      if (!Number.isFinite(oldWidth) || oldWidth <= 0 || !Number.isFinite(oldHeight)) return;
+      clearPlayerInput(); // Un resize nativo puede perder keyup sin emitir blur.
+      const ratioX = width / oldWidth;
+      const deltaY = groundY - oldGroundY;
+      const clampX = (x, margin = 0) => {
+        const safeMargin = Math.min(margin, width / 2);
+        return Math.max(safeMargin, Math.min(width - safeMargin, x));
+      };
+      const remapPoint = (entity, margin = 0) => {
+        if (Number.isFinite(entity.x)) entity.x = clampX(entity.x * ratioX, margin);
+        if (Number.isFinite(entity.y)) entity.y += deltaY;
+      };
+      const remapGroundEntity = (entity, margin, actor = false) => {
+        // Las plataformas mantienen su ancho en píxeles. Conservar el apoyo
+        // puede requerir una pequeña corrección horizontal tras ampliar.
+        const supportIndex = (!actor || (entity.isGrounded && entity.vy >= 0))
+          ? oldPlatforms.findIndex(p => Math.abs(entity.y - p.y) < 0.01 && entity.x >= p.x - margin && entity.x <= p.x + p.w + margin)
+          : -1;
+        remapPoint(entity, actor ? 25 : 0);
+        if (actor) {
+          if (Number.isFinite(entity.prevY)) entity.prevY += deltaY;
+          if (Number.isFinite(entity.currentSurfaceY)) entity.currentSurfaceY += deltaY;
+        }
+        if (supportIndex !== -1) {
+          const p = platforms[supportIndex];
+          entity.x = clampX(Math.max(p.x - margin, Math.min(p.x + p.w + margin, entity.x)), actor ? 25 : 0);
+          if (actor && (entity.x < p.x - margin || entity.x > p.x + p.w + margin)) entity.isGrounded = false;
+        }
+      };
+
+      // Mantener juntos los participantes de una canalización ya iniciada.
+      const devourOffsets = new Map();
+      for (const enemy of duendes) {
+        if (enemy.isDevouring && enemy.targetCorpse && Math.abs(enemy.x - enemy.targetCorpse.x) <= 20) {
+          devourOffsets.set(enemy, enemy.x - enemy.targetCorpse.x);
+        }
+      }
+      remapGroundEntity(player, 10, true);
+      for (const corpse of goblinCorpses) remapGroundEntity(corpse, 8);
+      for (const enemy of duendes) {
+        remapGroundEntity(enemy, 8, true);
+        if (devourOffsets.has(enemy)) enemy.x = clampX(enemy.targetCorpse.x + devourOffsets.get(enemy), 25);
+        // Remapear coordenadas recordadas, sin reiniciar decisiones ni timers.
+        if (Number.isFinite(enemy.lastSeenPlayerX)) enemy.lastSeenPlayerX *= ratioX;
+        if (Number.isFinite(enemy.lastSeenPlayerY)) enemy.lastSeenPlayerY += deltaY;
+        if (Number.isFinite(enemy.lastRelPlayerX)) enemy.lastRelPlayerX = player.x - enemy.x;
+        for (const trail of enemy.ghostTrails) remapPoint(trail);
+      }
+      for (const entity of [...projectiles, ...activeVisuals, ...damageNumbers]) remapPoint(entity);
+      if (Number.isFinite(PlayerBehaviorMemory.lastRecordedX)) PlayerBehaviorMemory.lastRecordedX *= ratioX;
+      validatePlayerPhysics();
     }
     window.addEventListener('resize', resize);
     resize();
@@ -1334,9 +1409,7 @@
         if (this.hp <= 0) {
           this.hp = 0;
           this.updateHpBar();
-          gameState = 'GAME_OVER';
-          RunStats.endTime = simulationTime;
-          showEndGameModal(false);
+          finishRun(false);
         }
         return true;
       },
@@ -2266,6 +2339,7 @@
       }
 
       takeDamage(amount) {
+        if (this.dead || isRunFinished()) return;
         this.hp -= amount;
         this.hitFlash = 6;
         this.lastDamageTime = simulationTime;
@@ -2881,6 +2955,7 @@
       }
 
       update(dt) {
+        if (this.dead || isRunFinished()) return;
         if (this.hitFlash > 0) this.hitFlash--;
         if (this.yellowFlash > 0) this.yellowFlash--;
 
@@ -2902,6 +2977,7 @@
         }
 
         this.updateCombat(dt);
+        if (isRunFinished()) return; // El golpe de este mismo paso puede terminar la partida.
         this.updateMovement(dt);
       }
 
@@ -3122,8 +3198,40 @@
     const damageNumbers = [];
 
     // --- FUNCIONES DE CONTROL DE PARTIDA ---
+    function clearPlayerInput() {
+      keys.left = keys.right = keys.up = keys.down = false;
+      jumpBuffer = 0;
+      coyoteTimer = 0;
+    }
+
+    function finishRun(isVictory) {
+      if (isRunFinished()) return;
+      gameState = isVictory ? 'VICTORY' : 'GAME_OVER';
+      RunStats.endTime = simulationTime;
+      scheduledActions.length = 0;
+      projectiles.length = 0;
+      hitStopTimer = 0;
+      clearPlayerInput();
+      showEndGameModal(isVictory);
+    }
+
+    function clearRoundCombat() {
+      projectiles.length = 0;
+      scheduledActions.length = 0;
+      // Liberar reservas al terminar una ronda sin enemigos o al reiniciar.
+      for (const corpse of goblinCorpses) {
+        if (corpse.reservedBy && corpse.reservedBy.targetCorpse === corpse) {
+          corpse.reservedBy.targetCorpse = null;
+        }
+        corpse.reserved = false;
+        corpse.reservedBy = null;
+      }
+    }
+
     function startRun() {
       if (gameState !== 'PRE_GAME') return;
+      currentRunId++;
+      scheduledActions.length = 0;
       document.getElementById('startRunBtn').classList.add('hidden');
       document.querySelectorAll('.btn-class').forEach(btn => btn.classList.add('disabled'));
 
@@ -3137,15 +3245,35 @@
     }
 
     function resetGame(goToSelection = false) {
+      currentRunId++;
       scheduledActions.length = 0;
+      clearRoundCombat();
+      for (const enemy of duendes) {
+        enemy.dead = true;
+        enemy.targetCorpse = null;
+        enemy.isDevouring = false;
+        enemy.devourTimer = 0;
+        enemy.isTransforming = false;
+        enemy.transformTimer = 0;
+        enemy.isStunned = 0;
+        enemy.isMutated = false;
+        enemy.consumedTraits = { scout: 0, warrior: 0, brute: 0 };
+        enemy.ghostTrails.length = 0;
+      }
+      for (const corpse of goblinCorpses) corpse.dead = true;
       duendes.length = 0;
       goblinCorpses.length = 0;
       projectiles.length = 0;
       activeVisuals.length = 0;
       damageNumbers.length = 0;
 
-      kills = 0;
       document.getElementById('killCounter').textContent = 'Bajas: 0';
+      clearPlayerInput();
+      coyoteTimer = 0;
+      mouseX = 300;
+      mouseY = 200;
+      selectedSkillIndex = 0;
+      updateSkillSelectionUI();
 
       RoundManager.reset();
       AdaptiveDirector.reset();
@@ -3155,6 +3283,7 @@
 
       screenShake = 0;
       screenFlash = 0;
+      screenFlashColor = 'white';
       hitStopTimer = 0;
 
       // Restaurar pilares
@@ -3175,9 +3304,17 @@
       // Restaurar jugador
       player.x = 140;
       player.y = groundY;
+      player.prevY = groundY;
       player.vx = 0;
       player.vy = 0;
+      player.isGrounded = true;
+      player.currentSurfaceY = groundY;
+      player.walkCycle = 0;
+      player.facing = 1;
+      player.dropTimer = 0;
       player.invuln = 0;
+      player.attackAnim = 0;
+      player.attackAngle = 0;
       player.lastDamageSource = 'UNKNOWN';
       player.lastPhysicsRecoveryReason = 'NONE';
       player.lastPhysicsRecovery = null;
@@ -3324,6 +3461,7 @@
         RoundManager.update(dt);
       }
 
+      if (isRunFinished()) now = RunStats.endTime;
       updateSkillsCooldownUI(now);
 
       let sx = 0, sy = 0;
@@ -3381,25 +3519,25 @@
       }
 
       for (let i = goblinCorpses.length - 1; i >= 0; i--) {
-        goblinCorpses[i].update(dt);
+        if (!isRunFinished()) goblinCorpses[i].update(dt);
         goblinCorpses[i].draw(ctx);
         if (goblinCorpses[i].dead) goblinCorpses.splice(i, 1);
       }
 
       for (let i = duendes.length - 1; i >= 0; i--) {
-        duendes[i].update(dt);
+        if (gameState === 'PLAYING') duendes[i].update(dt);
         duendes[i].draw(ctx);
         if (duendes[i].dead) duendes.splice(i, 1);
       }
 
       for (let i = projectiles.length - 1; i >= 0; i--) {
-        projectiles[i].update();
+        if (gameState === 'PLAYING') projectiles[i].update();
         projectiles[i].draw(ctx);
         if (projectiles[i].dead) projectiles.splice(i, 1);
       }
 
       for (let i = activeVisuals.length - 1; i >= 0; i--) {
-        activeVisuals[i].update(dt);
+        if (!isRunFinished()) activeVisuals[i].update(dt);
         activeVisuals[i].draw(ctx);
         if (activeVisuals[i].dead || (activeVisuals[i].alpha !== undefined && activeVisuals[i].alpha <= 0)) {
           activeVisuals.splice(i, 1);
@@ -3410,7 +3548,7 @@
       player.draw(ctx);
 
       for (let i = damageNumbers.length - 1; i >= 0; i--) {
-        damageNumbers[i].update();
+        if (!isRunFinished()) damageNumbers[i].update();
         damageNumbers[i].draw(ctx);
         if (damageNumbers[i].alpha <= 0) damageNumbers.splice(i, 1);
       }
@@ -3493,7 +3631,7 @@
 
         ctx.fillStyle = '#e2e8f0';
         ctx.fillText(`Round      : ${RoundManager.currentRoundIndex + 1} / 10`, boxX + 10, boxY + 30);
-        ctx.fillText(`Game State : ${gameState}`, boxX + 10, boxY + 44);
+        ctx.fillText(`State: ${gameState} | Run: ${currentRunId}`, boxX + 10, boxY + 44);
         ctx.fillText(`Enemies    : ${duendes.length} (Cola: ${RoundManager.spawnQueue.length})`, boxX + 10, boxY + 58);
 
         ctx.fillStyle = '#94a3b8';
@@ -3562,9 +3700,10 @@
     // Una pestaña oculta pausa todos los relojes de juego, incluidos cooldowns.
     document.addEventListener('visibilitychange', () => {
       lastTime = null;
-      keys.left = keys.right = keys.up = keys.down = false;
-      jumpBuffer = 0;
+      clearPlayerInput();
     });
+    window.addEventListener('blur', clearPlayerInput);
+    window.addEventListener('pointercancel', clearPlayerInput);
 
     requestAnimationFrame(loop);
   </script>
