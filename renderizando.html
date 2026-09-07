@@ -350,6 +350,27 @@
   <canvas id="canvas"></canvas>
 
   <script>
+    // Reloj común: las unidades históricas de física representan un paso a 60 Hz.
+    const FIXED_STEP_MS = 1000 / 60;
+    const MAX_STEPS_PER_FRAME = 120;
+    let simulationTime = performance.now();
+    const scheduledActions = [];
+
+    function scheduleSimulationAction(callback, delay) {
+      scheduledActions.push({ callback, due: simulationTime + delay });
+    }
+
+    function updateScheduledActions() {
+      const ready = scheduledActions.filter(action => action.due <= simulationTime);
+      for (const action of ready) {
+        const index = scheduledActions.indexOf(action);
+        if (index !== -1) {
+          scheduledActions.splice(index, 1);
+          action.callback();
+        }
+      }
+    }
+
     // --- ESTADO GENERAL DE LA PARTIDA ---
     let gameState = 'PRE_GAME'; // PRE_GAME, ROUND_INTRO, PLAYING, ROUND_CLEAR, GAME_OVER, VICTORY
 
@@ -405,18 +426,18 @@
 
       notifyAoE() {
         this.recentAoECount++;
-        this.lastAoETime = performance.now();
+        this.lastAoETime = simulationTime;
       },
       notifyHeal() {
-        this.lastHealDetectedTime = performance.now();
+        this.lastHealDetectedTime = simulationTime;
       },
       notifyPlayerAttack() {
-        this.lastPlayerAttackTime = performance.now();
+        this.lastPlayerAttackTime = simulationTime;
       },
       update() {
-        if (performance.now() - this.lastAoETime > 4500 && this.recentAoECount > 0) {
+        if (simulationTime - this.lastAoETime > 4500 && this.recentAoECount > 0) {
           this.recentAoECount--;
-          this.lastAoETime = performance.now();
+          this.lastAoETime = simulationTime;
         }
       },
       reset() {
@@ -446,13 +467,13 @@
       },
 
       notifyDamage(amount) {
-        const now = performance.now();
+        const now = simulationTime;
         this.recentDamageEvents.push({ time: now, amount: amount });
         this.lastDamageTime = now;
       },
 
       notifyKill() {
-        const now = performance.now();
+        const now = simulationTime;
         this.recentKillEvents.push({ time: now });
         RunStats.totalKills++;
       },
@@ -468,7 +489,7 @@
       },
 
       update(dt, playerX, playerY, isBehindObstacle) {
-        const now = performance.now();
+        const now = simulationTime;
         this.recentDamageEvents = this.recentDamageEvents.filter(e => now - e.time <= 12000);
         this.recentKillEvents = this.recentKillEvents.filter(e => now - e.time <= 12000);
 
@@ -519,7 +540,7 @@
       mutationsThisRound: 0,
 
       update(dt) {
-        const now = performance.now();
+        const now = simulationTime;
 
         if (this.mutationCooldown > 0) {
           this.mutationCooldown -= dt;
@@ -735,7 +756,7 @@
           if (this.roundClearTimer <= 0) {
             if (this.currentRoundIndex + 1 >= ROUND_CONFIG.length) {
               gameState = 'VICTORY';
-              RunStats.endTime = performance.now();
+              RunStats.endTime = simulationTime;
               showEndGameModal(true);
             } else {
               this.initRound(this.currentRoundIndex + 1);
@@ -822,7 +843,7 @@
         c.save();
 
         if (this.reserved) {
-          const pulse = (Math.sin(Date.now() * 0.006) + 1) * 0.5;
+          const pulse = (Math.sin(simulationTime * 0.006) + 1) * 0.5;
           c.strokeStyle = `rgba(192, 132, 252, ${0.15 + pulse * 0.35})`;
           c.lineWidth = 1.5;
           c.beginPath();
@@ -1310,7 +1331,7 @@
           this.hp = 0;
           this.updateHpBar();
           gameState = 'GAME_OVER';
-          RunStats.endTime = performance.now();
+          RunStats.endTime = simulationTime;
           showEndGameModal(false);
         }
       },
@@ -1420,7 +1441,7 @@
           c.strokeStyle = '#ef4444';
           c.beginPath();
           c.moveTo(this.x - this.facing * 5, headY - 2);
-          c.lineTo(this.x - this.facing * 18, headY + Math.sin(Date.now()*0.01)*4);
+          c.lineTo(this.x - this.facing * 18, headY + Math.sin(simulationTime*0.01)*4);
           c.stroke();
           c.strokeStyle = color;
         } else if (cls === 'mage') {
@@ -1525,7 +1546,7 @@
     function executeBasicAttack(tx, ty) {
       if (gameState !== 'PLAYING') return;
 
-      const now = performance.now();
+      const now = simulationTime;
       const cls = CLASSES[currentClassKey];
       const atk = cls.basicAttack;
 
@@ -1600,7 +1621,7 @@
     function executeClassSkill(tx, ty) {
       if (gameState !== 'PLAYING') return;
 
-      const now = performance.now();
+      const now = simulationTime;
       const cls = CLASSES[currentClassKey];
       const sk = cls.skills[selectedSkillIndex];
 
@@ -1644,7 +1665,7 @@
         player.vx = Math.cos(angle) * 14;
         player.vy = Math.min(-9, Math.sin(angle) * 14);
         player.isGrounded = false;
-        setTimeout(() => {
+        scheduleSimulationAction(() => {
           screenShake = 16;
           activeVisuals.push(new GroundCrack(player.x, player.y, sk.range, cls.color));
           for (const d of duendes) {
@@ -1768,7 +1789,7 @@
       } else if (sk.type === 'blade_flurry') {
         audio.playSword();
         for (let i = 0; i < 4; i++) {
-          setTimeout(() => {
+          scheduleSimulationAction(() => {
             activeVisuals.push(new SlashArc(player.x, player.y - 30, Math.random()*Math.PI*2, sk.range, cls.color, 3.5));
           }, i * 60);
         }
@@ -2188,12 +2209,12 @@
       takeDamage(amount) {
         this.hp -= amount;
         this.hitFlash = 6;
-        this.lastDamageTime = performance.now();
+        this.lastDamageTime = simulationTime;
         this.lastDamageAmount = amount;
         this.alertLevel = 100;
         this.lastSeenPlayerX = player.x;
         this.lastSeenPlayerY = player.y;
-        this.lastSeenTime = performance.now();
+        this.lastSeenTime = simulationTime;
 
         // Interrupción de DEVOUR
         if ((this.isDevouring || this.currentState === 'DEVOUR') && !this.isTransforming) {
@@ -2219,7 +2240,7 @@
             ally.alertLevel = Math.max(ally.alertLevel, 85);
             ally.lastSeenPlayerX = player.x;
             ally.lastSeenPlayerY = player.y;
-            ally.lastSeenTime = performance.now();
+            ally.lastSeenTime = simulationTime;
           }
         }
 
@@ -2245,7 +2266,7 @@
       }
 
       updatePerception(dt) {
-        const now = performance.now();
+        const now = simulationTime;
         const distToPlayer = Math.hypot(player.x - this.x, (player.y - 25) - (this.y - 25));
         const inHearing = distToPlayer <= this.hearingRange;
         const playerIsNoisy = Math.abs(player.vx) > 1 || !player.isGrounded || now - EncounterMemory.lastPlayerAttackTime < 800;
@@ -2288,7 +2309,7 @@
           return;
         }
 
-        const now = performance.now();
+        const now = simulationTime;
         const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
         const hpRatio = this.hp / this.maxHp;
         const playerHpRatio = player.hp / player.maxHp;
@@ -2880,7 +2901,7 @@
 
         if (this.isDevouring) {
           c.save();
-          const devourPulse = (Math.sin(Date.now() * 0.012) + 1) * 0.5;
+          const devourPulse = (Math.sin(simulationTime * 0.012) + 1) * 0.5;
           c.strokeStyle = `rgba(192, 132, 252, ${0.3 + devourPulse * 0.5})`;
           c.lineWidth = 2;
           c.beginPath();
@@ -3041,7 +3062,7 @@
       document.querySelectorAll('.btn-class').forEach(btn => btn.classList.add('disabled'));
 
       RunStats.reset();
-      RunStats.startTime = performance.now();
+      RunStats.startTime = simulationTime;
       AdaptiveDirector.reset();
       PlayerBehaviorMemory.reset();
       EncounterMemory.reset();
@@ -3050,6 +3071,7 @@
     }
 
     function resetGame(goToSelection = false) {
+      scheduledActions.length = 0;
       duendes.length = 0;
       goblinCorpses.length = 0;
       projectiles.length = 0;
@@ -3102,7 +3124,7 @@
         // Reintentar de inmediato con la misma clase seleccionada
         document.querySelectorAll('.btn-class').forEach(btn => btn.classList.add('disabled'));
         document.getElementById('startRunBtn').classList.add('hidden');
-        RunStats.startTime = performance.now();
+        RunStats.startTime = simulationTime;
         RoundManager.initRound(0);
       }
     }
@@ -3126,7 +3148,7 @@
       }
 
       const reachedRound = isVictory ? 10 : RoundManager.currentRoundIndex + 1;
-      const formattedTime = RunStats.getFormattedTime(performance.now());
+      const formattedTime = RunStats.getFormattedTime(simulationTime);
       const clsName = CLASSES[currentClassKey].name;
 
       statsGrid.innerHTML = `
@@ -3206,16 +3228,14 @@
     renderSkillsUI();
     player.syncStats();
 
-    // --- BUCLE PRINCIPAL DE JUEGO (60 FPS) ---
-    let lastTime = performance.now();
-
-    function loop(now) {
-      const dt = Math.min(now - lastTime, 50);
-      lastTime = now;
-
+    // --- PASO DE SIMULACIÓN Y DIBUJO A 60 Hz ---
+    // También el dibujo contiene emisiones aleatorias: se ejecuta una vez por
+    // paso para conservar su frecuencia y el orden de la versión de referencia.
+    function simulateStep(now) {
+      const dt = FIXED_STEP_MS;
+      updateScheduledActions();
       if (hitStopTimer > 0) {
-        hitStopTimer -= dt;
-        requestAnimationFrame(loop);
+        hitStopTimer = Math.max(0, hitStopTimer - dt);
         return;
       }
 
@@ -3430,8 +3450,40 @@
       }
 
       ctx.restore();
+    }
+
+    // El monitor solo determina cuántos pasos pendientes se procesan por frame.
+    // No se descarta tiempo al bajar de FPS; el límite conserva el exceso para
+    // el siguiente frame y evita bloquear la interfaz durante una pausa larga.
+    let lastTime = performance.now();
+    let accumulator = 0;
+
+    function loop(now) {
+      if (document.hidden) {
+        lastTime = null;
+        requestAnimationFrame(loop);
+        return;
+      }
+      if (lastTime === null) lastTime = now;
+      accumulator += Math.max(0, now - lastTime);
+      lastTime = now;
+
+      let steps = 0;
+      while (accumulator + 1e-7 >= FIXED_STEP_MS && steps < MAX_STEPS_PER_FRAME) {
+        accumulator = Math.max(0, accumulator - FIXED_STEP_MS);
+        simulationTime += FIXED_STEP_MS;
+        simulateStep(simulationTime);
+        steps++;
+      }
       requestAnimationFrame(loop);
     }
+
+    // Una pestaña oculta pausa todos los relojes de juego, incluidos cooldowns.
+    document.addEventListener('visibilitychange', () => {
+      lastTime = null;
+      keys.left = keys.right = keys.up = keys.down = false;
+      jumpBuffer = 0;
+    });
 
     requestAnimationFrame(loop);
   </script>
