@@ -415,12 +415,12 @@
     // --- CONFIGURACIÓN DE LAS 6 RONDAS ---
     const ROUND_CONFIG = [
       { round: 1, baseEnemies: ['scout', 'scout', 'warrior', 'warrior'] },
-      { round: 2, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'scout'] },
-      { round: 3, baseEnemies: ['scout', 'warrior', 'warrior', 'brute'] },
-      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute'] },
-      { round: 5, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'brute'] },
+      { round: 2, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'archer'] },
+      { round: 3, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer'] },
+      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'archer'] },
+      { round: 5, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'brute', 'archer'] },
       // TODO: REEMPLAZAR RONDA 6 POR BOSS REY DUENDE
-      { round: 6, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'warrior', 'brute', 'brute'] }
+      { round: 6, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'brute', 'archer', 'archer'] }
     ];
 
     // --- MEMORIA COLECTIVA DE COMBATE ---
@@ -611,7 +611,7 @@
       },
 
       triggerDevourCandidate() {
-        const availableCorpses = goblinCorpses.filter(c => !c.dead && !c.reserved);
+        const availableCorpses = goblinCorpses.filter(c => c.devourable && !c.dead && !c.reserved);
         if (availableCorpses.length === 0) return;
 
         const availableGoblins = duendes.filter(d => !d.dead && !d.isMutated && d.isStunned <= 0 && d.currentState !== 'DEVOUR' && d.currentState !== 'TRANSFORM' && !d.isTransforming);
@@ -807,10 +807,11 @@
 
     // --- CADÁVERES TEMPORALES ---
     class GoblinCorpse {
-      constructor(x, y, type, scale) {
+      constructor(x, y, type, scale, devourable = ['scout', 'warrior', 'brute'].includes(type)) {
         this.x = x;
         this.y = y;
         this.type = type;
+        this.devourable = devourable && ['scout', 'warrior', 'brute'].includes(type);
         this.scale = scale;
         this.lifeTime = 8000;
         this.totalLife = 0;
@@ -1283,7 +1284,7 @@
         if (Number.isFinite(enemy.lastRelPlayerX)) enemy.lastRelPlayerX = player.x - enemy.x;
         for (const trail of enemy.ghostTrails) remapPoint(trail);
       }
-      for (const entity of [...projectiles, ...activeVisuals, ...damageNumbers]) remapPoint(entity);
+      for (const entity of [...projectiles, ...enemyProjectiles, ...activeVisuals, ...damageNumbers]) remapPoint(entity);
       if (Number.isFinite(PlayerBehaviorMemory.lastRecordedX)) PlayerBehaviorMemory.lastRecordedX *= ratioX;
       validatePlayerPhysics();
     }
@@ -2222,6 +2223,75 @@
       }
     }
 
+    // Primer contacto de un segmento con una caja. null significa sin impacto.
+    function segmentBoxHit(x0, y0, x1, y1, box) {
+      let enter = 0, exit = 1;
+      for (const [origin, delta, min, max] of [
+        [x0, x1 - x0, box.x, box.x + box.w],
+        [y0, y1 - y0, box.y, box.y + box.h]
+      ]) {
+        if (Math.abs(delta) < 1e-9) {
+          if (origin < min || origin > max) return null;
+        } else {
+          const a = (min - origin) / delta, b = (max - origin) / delta;
+          enter = Math.max(enter, Math.min(a, b));
+          exit = Math.min(exit, Math.max(a, b));
+          if (enter > exit) return null;
+        }
+      }
+      return enter;
+    }
+
+    class EnemyArrow {
+      constructor(x, y, angle, speed, dmg) {
+        this.x = x; this.y = y;
+        this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed;
+        this.angle = angle; this.dmg = dmg;
+        this.sourceType = 'ARCHER';
+        this.damageType = 'projectile';
+        this.dead = false;
+      }
+      update() {
+        if (this.dead || gameState !== 'PLAYING') return;
+        const nextX = this.x + this.vx, nextY = this.y + this.vy;
+        if (![this.x, this.y, nextX, nextY].every(Number.isFinite)) { this.dead = true; return; }
+        let firstHit = Infinity, hitsPlayer = false;
+        // Las cajas se amplían 2 px para incluir el grosor de la flecha.
+        for (const box of [...obstacles.filter(o => !o.broken), ...platforms]) {
+          const t = segmentBoxHit(this.x, this.y, nextX, nextY, { x: box.x - 2, y: box.y - 2, w: box.w + 4, h: box.h + 4 });
+          if (t !== null && t < firstHit) firstHit = t;
+        }
+        const playerHit = segmentBoxHit(this.x, this.y, nextX, nextY, { x: player.x - 12, y: player.y - 62, w: 24, h: 64 });
+        if (playerHit !== null && playerHit < firstHit) { firstHit = playerHit; hitsPlayer = true; }
+        if (firstHit !== Infinity) {
+          this.x += this.vx * firstHit; this.y += this.vy * firstHit;
+          this.dead = true; // Incluso si la invulnerabilidad rechaza el daño.
+          if (hitsPlayer) player.takeDamage(this.dmg, this.sourceType);
+          return;
+        }
+        this.x = nextX; this.y = nextY;
+        if (this.x < -60 || this.x > width + 60 || this.y < -60 || this.y > groundY + 60) this.dead = true;
+      }
+      draw(c) {
+        c.save();
+        c.strokeStyle = '#fcd34d'; c.lineWidth = 2;
+        const ux = Math.cos(this.angle), uy = Math.sin(this.angle);
+        c.beginPath(); c.moveTo(this.x - ux * 16, this.y - uy * 16); c.lineTo(this.x, this.y);
+        c.moveTo(this.x - ux * 6 - uy * 3, this.y - uy * 6 + ux * 3);
+        c.lineTo(this.x, this.y);
+        c.lineTo(this.x - ux * 6 + uy * 3, this.y - uy * 6 - ux * 3);
+        c.stroke(); c.restore();
+      }
+    }
+
+    const ARCHER_CONFIG = {
+      name: 'Archer', maxHp: 20, baseSpeed: 1.9, jumpForce: -13.5,
+      dmg: 8, color: '#a3a34a', scale: 0.95,
+      visionRange: 620, hearingRange: 280, attackRange: 350,
+      windupDuration: 620, recoveryDuration: 900, predictionAccuracy: 0.35,
+      arrowSpeed: 10, retreatRange: 180, minimumRange: 220, preferredRange: 260
+    };
+
     // --- IA DE LOS DUENDES CON FÍSICA UNIFICADA Y HOTFIX DE STUN/KNOCKBACK ---
     class Duende {
       constructor(x, type) {
@@ -2244,7 +2314,14 @@
         this.playerCrossCount = 0;
         this.lastPlayerCrossTime = 0;
 
-        if (type === 'scout') {
+        this.devourable = ['scout', 'warrior', 'brute'].includes(type);
+        if (type === 'archer') {
+          Object.assign(this, ARCHER_CONFIG);
+          this.shotPhase = 'READY';
+          this.shotTimer = 0;
+          this.shotAngle = 0;
+          this.blockedShotTimer = 0;
+        } else if (type === 'scout') {
           this.name = 'Scout';
           this.maxHp = 15;
           this.baseSpeed = 2.7;
@@ -2378,7 +2455,7 @@
           this.dead = true;
           PlayerBehaviorMemory.notifyKill();
           document.getElementById('killCounter').textContent = `Bajas: ${RunStats.totalKills}`;
-          goblinCorpses.push(new GoblinCorpse(this.x, this.y, this.type, this.scale));
+          goblinCorpses.push(new GoblinCorpse(this.x, this.y, this.type, this.scale, this.devourable));
         }
       }
 
@@ -2436,6 +2513,11 @@
 
       evaluateUtilityAI() {
         if (this.isStunned > 0 || this.isDevouring || this.isTransforming || (this.currentState === 'DEVOUR' && this.targetCorpse && !this.targetCorpse.dead)) {
+          return;
+        }
+
+        if (this.type === 'archer') {
+          this.evaluateArcherAI();
           return;
         }
 
@@ -2557,8 +2639,90 @@
         }
       }
 
+      archerHasShotLine() {
+        const x = this.x, y = this.y - 36 * this.scale;
+        return [...obstacles.filter(o => !o.broken), ...platforms].every(box =>
+          segmentBoxHit(x, y, player.x, player.y - 30, { x: box.x - 2, y: box.y - 2, w: box.w + 4, h: box.h + 4 }) === null);
+      }
+
+      archerCanMove(dir) {
+        const nextX = this.x + dir * 45;
+        return nextX >= 25 && nextX <= width - 25 && obstacles.every(o => o.broken ||
+          segmentBoxHit(this.x, this.y - 10, nextX, this.y - 10, { x: o.x - 8, y: o.y, w: o.w + 16, h: o.h }) === null);
+      }
+
+      evaluateArcherAI() {
+        if (this.shotPhase === 'DRAW' || this.shotPhase === 'RELEASE') return;
+        const dist = Math.hypot(player.x - this.x, player.y - this.y);
+        const away = this.x >= player.x ? 1 : -1;
+        const hasLine = this.archerHasShotLine();
+        if (!this.hasVisualContact && this.alertLevel <= 50) {
+          this.currentState = this.alertLevel > 20 && this.lastSeenPlayerX !== null ? 'INVESTIGATE' : 'PATROL';
+        } else if (dist < this.retreatRange && this.archerCanMove(away)) {
+          this.currentState = 'RETREAT';
+        } else if (dist < this.minimumRange && this.archerCanMove(away)) {
+          this.currentState = 'ARCHER_REPOSITION';
+        } else if (hasLine && dist <= this.attackRange) {
+          this.currentState = 'ARCHER_AIM'; // También dispara si no queda espacio para huir.
+        } else {
+          this.currentState = 'ARCHER_REPOSITION';
+        }
+        this.currentTargetName = this.currentState === 'ARCHER_REPOSITION' ? 'Reposición' :
+          (this.currentState === 'PATROL' ? 'Ruta' : 'Jugador');
+      }
+
+      updateArcherCombat(dt) {
+        if (this.currentState === 'DEVOUR' || this.isDevouring) {
+          this.shotPhase = 'READY'; this.combatPhase = 'READY'; this.shotTimer = 0;
+          this.attackDirectionLocked = false;
+          return;
+        }
+        const hasLine = this.archerHasShotLine();
+        this.blockedShotTimer = hasLine ? 0 : this.blockedShotTimer + dt;
+        const aim = () => {
+          const distance = Math.hypot(player.x - this.x, player.y - this.y);
+          const leadSteps = Math.min(18, distance / this.arrowSpeed);
+          this.shotAngle = Math.atan2(player.y - 30 - (this.y - 36 * this.scale),
+            player.x + player.vx * leadSteps * this.predictionAccuracy - this.x);
+          this.lockedFacing = Math.cos(this.shotAngle) >= 0 ? 1 : -1;
+          this.facing = this.lockedFacing;
+        };
+        if (this.shotPhase === 'READY') {
+          if (this.currentState !== 'ARCHER_AIM' || !hasLine) return;
+          this.shotPhase = 'DRAW'; this.combatPhase = 'WINDUP';
+          this.shotTimer = this.windupDuration;
+          this.attackDirectionLocked = false;
+          aim(); audio.playTelegraph();
+        } else if (this.shotPhase === 'DRAW') {
+          this.shotTimer -= dt;
+          // Últimos 220 ms con puntería fija: se puede esquivar cambiando dirección.
+          if (this.shotTimer > 220) aim();
+          else this.attackDirectionLocked = true;
+          if (this.blockedShotTimer >= 400) {
+            this.shotPhase = 'READY'; this.combatPhase = 'READY';
+            this.attackDirectionLocked = false;
+            this.currentState = 'ARCHER_REPOSITION';
+          } else if (this.shotTimer <= 0) {
+            if (hasLine) enemyProjectiles.push(new EnemyArrow(this.x, this.y - 36 * this.scale, this.shotAngle, this.arrowSpeed, this.dmg));
+            this.shotPhase = 'RELEASE'; this.combatPhase = 'ACTIVE';
+            this.currentState = 'ARCHER_SHOOT'; this.shotTimer = 100;
+          }
+        } else if (this.shotPhase === 'RELEASE') {
+          this.shotTimer -= dt;
+          if (this.shotTimer <= 0) {
+            this.shotPhase = 'RECOVERY'; this.combatPhase = 'RECOVERY';
+            this.shotTimer = this.recoveryDuration;
+            this.attackDirectionLocked = false;
+          }
+        } else if (this.shotPhase === 'RECOVERY') {
+          this.shotTimer -= dt;
+          if (this.shotTimer <= 0) { this.shotPhase = 'READY'; this.combatPhase = 'READY'; }
+        }
+      }
+
       updateCombat(dt) {
         if (this.isStunned > 0 || this.isTransforming || gameState === 'GAME_OVER' || gameState === 'VICTORY') return;
+        if (this.type === 'archer') { this.updateArcherCombat(dt); return; }
 
         if (this.currentState === 'BREAK_OBSTACLE' && this.targetObstacle && !this.targetObstacle.broken) {
           if (this.combatPhase === 'READY') {
@@ -2686,6 +2850,18 @@
           }
 
           switch (this.currentState) {
+            case 'ARCHER_AIM':
+            case 'ARCHER_SHOOT':
+              moveDir = 0;
+              break;
+
+            case 'ARCHER_REPOSITION':
+              const toward = Math.sign(player.x - this.x) || this.facing;
+              moveDir = distToPlayer > this.preferredRange || !this.archerHasShotLine() ? toward : -toward;
+              if ((this.x + moveDir * 45 < 25 || this.x + moveDir * 45 > width - 25) && this.archerCanMove(-moveDir)) moveDir *= -1;
+              // Ante un pilar se aproxima lo suficiente para usar el salto común.
+              break;
+
             case 'DEVOUR':
               if (this.targetCorpse && !this.targetCorpse.dead) {
                 const diffX = this.targetCorpse.x - this.x;
@@ -2870,6 +3046,10 @@
             this.dropTimer = 16;
           }
 
+          if (this.type === 'archer' && (this.shotPhase === 'DRAW' || this.shotPhase === 'RELEASE')) {
+            moveDir = 0;
+            separationForce = 0;
+          }
           this.vx += (moveDir * this.speed * 0.22) + (separationForce * 0.15);
           this.vx *= 0.82;
 
@@ -3092,6 +3272,7 @@
         }
 
         let armAngle = this.combatPhase === 'WINDUP' ? -1.2 * this.facing : 0.4 * this.facing;
+        if (this.type === 'archer' && (this.shotPhase === 'DRAW' || this.shotPhase === 'RELEASE')) armAngle = this.shotAngle;
         if (this.isDevouring && this.targetCorpse) {
           const toCorpseAngle = Math.atan2((this.targetCorpse.y - 4) - shoulderY, this.targetCorpse.x - posX);
           armAngle = toCorpseAngle;
@@ -3103,6 +3284,38 @@
         const handY = shoulderY + Math.sin(armAngle) * 16 * s;
         c.lineTo(handX, handY);
         c.stroke();
+
+        if (this.type === 'archer') {
+          c.save(); // Arco y carcaj aislados del render común del duende.
+          c.strokeStyle = '#92400e'; c.lineWidth = 4;
+          c.beginPath(); c.moveTo(posX - this.facing * 7, shoulderY - 7);
+          c.lineTo(posX - this.facing * 11, hipY + 3); c.stroke();
+          c.strokeStyle = '#fde68a'; c.lineWidth = 1;
+          for (let i = 0; i < 3; i++) {
+            c.beginPath(); c.moveTo(posX - this.facing * (5 + i * 3), shoulderY - 14);
+            c.lineTo(posX - this.facing * (8 + i * 2), hipY); c.stroke();
+          }
+          const shooting = this.shotPhase === 'DRAW' || this.shotPhase === 'RELEASE';
+          const bowAngle = shooting ? this.shotAngle : (this.facing > 0 ? 0 : Math.PI);
+          const tension = this.shotPhase === 'DRAW' ? Math.min(1, 1 - this.shotTimer / this.windupDuration) : 0;
+          const recoil = this.shotPhase === 'RELEASE' ? 3 : 0;
+          c.translate(posX, shoulderY); c.rotate(bowAngle);
+          c.strokeStyle = '#d6b65c'; c.lineWidth = 2.5;
+          c.beginPath(); c.moveTo(20 - recoil, -19);
+          c.quadraticCurveTo(38 - recoil, 0, 20 - recoil, 19); c.stroke();
+          c.strokeStyle = '#fef3c7'; c.lineWidth = 1;
+          c.beginPath(); c.moveTo(20 - recoil, -19);
+          c.lineTo(20 - tension * 13 - recoil, 0); c.lineTo(20 - recoil, 19); c.stroke();
+          c.strokeStyle = this.color; c.lineWidth = 2;
+          c.beginPath(); c.moveTo(0, 0); c.lineTo(23 - recoil, 0);
+          c.moveTo(0, 0); c.lineTo(8, 9); c.lineTo(20 - tension * 13, 0); c.stroke();
+          if (this.shotPhase === 'DRAW') {
+            c.strokeStyle = this.attackDirectionLocked ? '#fbbf24' : '#fef3c7';
+            c.beginPath(); c.moveTo(7, 0); c.lineTo(42, 0);
+            c.moveTo(38, -3); c.lineTo(42, 0); c.lineTo(38, 3); c.stroke();
+          }
+          c.restore();
+        }
 
         if (this.consumedTraits.warrior > 0) {
           c.save();
@@ -3135,6 +3348,7 @@
         if (debugMode) {
           const debugBoxW = 125;
           let debugBoxH = this.isMutated ? 58 : 48;
+          if (this.type === 'archer') debugBoxH += 22;
           if (this.isStunned > 0 || this.isTransforming) debugBoxH += 11;
 
           const dbgX = posX - debugBoxW / 2;
@@ -3177,6 +3391,12 @@
           if (this.isMutated) {
             c.fillStyle = '#c084fc';
             c.fillText(`MUTATED: B:${this.consumedTraits.brute} W:${this.consumedTraits.warrior} S:${this.consumedTraits.scout}`, dbgX + 5, currentLineY);
+            currentLineY += 10;
+          }
+          if (this.type === 'archer') {
+            c.fillStyle = '#fde68a';
+            c.fillText(`DIST: ${Math.round(Math.hypot(player.x - this.x, player.y - this.y))}`, dbgX + 5, currentLineY);
+            c.fillText(`SHOT: ${this.shotPhase}`, dbgX + 5, currentLineY + 11);
           }
         }
 
@@ -3191,6 +3411,7 @@
     const duendes = [];
     const goblinCorpses = [];
     const projectiles = [];
+    const enemyProjectiles = [];
     const activeVisuals = [];
     const damageNumbers = [];
 
@@ -3208,12 +3429,14 @@
       scheduledActions.length = 0;
       projectiles.length = 0;
       hitStopTimer = 0;
+      enemyProjectiles.length = 0;
       clearPlayerInput();
       showEndGameModal(isVictory);
     }
 
     function clearRoundCombat() {
       projectiles.length = 0;
+      enemyProjectiles.length = 0;
       scheduledActions.length = 0;
       // Liberar reservas al terminar una ronda sin enemigos o al reiniciar.
       for (const corpse of goblinCorpses) {
@@ -3262,6 +3485,7 @@
       goblinCorpses.length = 0;
       projectiles.length = 0;
       activeVisuals.length = 0;
+      enemyProjectiles.length = 0;
       damageNumbers.length = 0;
 
       document.getElementById('killCounter').textContent = 'Bajas: 0';
@@ -3539,6 +3763,14 @@
         if (activeVisuals[i].dead || (activeVisuals[i].alpha !== undefined && activeVisuals[i].alpha <= 0)) {
           activeVisuals.splice(i, 1);
         }
+      }
+
+      for (let i = enemyProjectiles.length - 1; i >= 0 && !isRunFinished(); i--) {
+        const arrow = enemyProjectiles[i];
+        arrow.update();
+        arrow.draw(ctx);
+        // Un impacto fatal vacía el array desde finishRun().
+        if (arrow.dead && enemyProjectiles[i] === arrow) enemyProjectiles.splice(i, 1);
       }
 
       player.update();
