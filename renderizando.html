@@ -378,7 +378,7 @@
     }
 
     // --- ESTADO GENERAL DE LA PARTIDA ---
-    let gameState = 'PRE_GAME'; // PRE_GAME, ROUND_INTRO, PLAYING, ROUND_CLEAR, GAME_OVER, VICTORY
+    let gameState = 'PRE_GAME'; // PRE_GAME, ROUND_INTRO, PLAYING, ROUND_CLEAR, BOSS_REVEAL, GAME_OVER, VICTORY
 
     function isRunFinished() {
       return gameState === 'GAME_OVER' || gameState === 'VICTORY';
@@ -614,7 +614,7 @@
         const availableCorpses = goblinCorpses.filter(c => c.devourable && !c.dead && !c.reserved);
         if (availableCorpses.length === 0) return;
 
-        const availableGoblins = duendes.filter(d => !d.dead && !d.isMutated && d.isStunned <= 0 && d.currentState !== 'DEVOUR' && d.currentState !== 'TRANSFORM' && !d.isTransforming);
+        const availableGoblins = duendes.filter(d => !d.isBossVessel && !d.dead && !d.isMutated && d.isStunned <= 0 && d.currentState !== 'DEVOUR' && d.currentState !== 'TRANSFORM' && !d.isTransforming);
         if (availableGoblins.length === 0) return;
 
         let bestPair = null;
@@ -686,6 +686,10 @@
         this.healGivenThisClear = false;
         AdaptiveDirector.mutationsThisRound = 0;
         gameState = 'ROUND_INTRO';
+        if (index === 5) {
+          BossEncounter.prepare(this.spawnQueue);
+          this.spawnEnemy(); // El recipiente existe desde el comienzo de R6.
+        }
       },
 
       buildScaledQueue(baseEnemies) {
@@ -711,6 +715,7 @@
       },
 
       update(dt) {
+        if (BossEncounter.active) return; // Solo la muerte del Rey puede completar R6.
         if (gameState === 'ROUND_INTRO') {
           this.roundIntroTimer -= dt;
           if (this.roundIntroTimer <= 0) {
@@ -783,7 +788,9 @@
           spawnX = this.spawnSideToggle ? safeMargin : width - safeMargin;
         }
 
-        duendes.push(new Duende(spawnX, type));
+        const enemy = new Duende(spawnX, type);
+        if (this.currentRoundIndex === 5) BossEncounter.assign(enemy);
+        duendes.push(enemy);
       },
 
       reset() {
@@ -1310,6 +1317,7 @@
         else remapPoint(entity);
       }
       if (Number.isFinite(PlayerBehaviorMemory.lastRecordedX)) PlayerBehaviorMemory.lastRecordedX *= ratioX;
+      BossEncounter.remapResize(ratioX, deltaY);
       validatePlayerPhysics();
     }
     window.addEventListener('resize', resize);
@@ -1443,7 +1451,7 @@
 
         this.shamanSlowTimer = Math.max(0, this.shamanSlowTimer - FIXED_STEP_MS);
         const c = CLASSES[currentClassKey];
-        const effectiveSpeed = c.speed * (this.shamanSlowTimer > 0 ? 0.75 : 1);
+        const effectiveSpeed = c.speed * (this.shamanSlowTimer > 0 ? 0.75 : 1) * (gameState === 'BOSS_REVEAL' ? 0.45 : 1);
         this.prevY = this.y;
         if (this.invuln > 0) this.invuln--;
         if (this.attackAnim > 0) this.attackAnim -= 0.12;
@@ -1721,10 +1729,8 @@
       if (atk.type === 'melee_slash_basic') {
         audio.playSword(260);
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#f1f5f9', 2.0));
-        for (const d of duendes) {
-          const dDist = Math.hypot(d.x - player.x, (d.y - 20) - (player.y - 30));
-          const dAng = Math.atan2((d.y - 20) - (player.y - 30), d.x - player.x);
-          if (dDist <= atk.range && Math.abs(angleDiff(angle, dAng)) < 0.7) {
+        for (const d of getCombatTargets()) {
+          if (attackArcHits(d, player.x, player.y - 30, angle, atk.range, 0.7)) {
             d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * 3.5;
           }
@@ -1732,8 +1738,8 @@
       } else if (atk.type === 'shield_bash_basic') {
         audio.playSlam(0.12);
         activeVisuals.push(new ShieldShock(player.x + Math.cos(angle)*16, player.y - 30 + Math.sin(angle)*16, angle, atk.range, '#93c5fd', 2.2));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= atk.range) {
             d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * atk.knockback;
             d.vy = -2.5;
@@ -1745,8 +1751,8 @@
       } else if (atk.type === 'staff_strike_basic') {
         audio.playSlam(0.1);
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#fde047', 2.0));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= atk.range) {
             d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * atk.knockback;
             d.vy = -2.0;
@@ -1755,8 +1761,8 @@
       } else if (atk.type === 'fast_stab_basic') {
         audio.playSword(420);
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#34d399', 1.8));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= atk.range) {
             d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * 2.0;
           }
@@ -1764,8 +1770,8 @@
       } else if (atk.type === 'scythe_sweep_basic') {
         audio.playSword(240);
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#c084fc', 2.2));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= atk.range) {
             d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * 3.0;
           }
@@ -1813,10 +1819,8 @@
       if (sk.type === 'melee_slash') {
         audio.playSword();
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, sk.range, cls.color, 4));
-        for (const d of duendes) {
-          const dDist = Math.hypot(d.x - player.x, (d.y - 20) - (player.y - 30));
-          const dAng = Math.atan2((d.y - 20) - (player.y - 30), d.x - player.x);
-          if (dDist <= sk.range && Math.abs(angleDiff(angle, dAng)) < sk.arc / 2) {
+        for (const d of getCombatTargets()) {
+          if (attackArcHits(d, player.x, player.y - 30, angle, sk.range, sk.arc / 2)) {
             d.takeDamage(sk.dmg, damageSource());
             d.vx = Math.cos(angle) * 6;
           }
@@ -1825,8 +1829,8 @@
         audio.playSword();
         EncounterMemory.notifyAoE();
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.range, cls.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) {
             d.takeDamage(sk.dmg, damageSource());
             d.vx = (d.x > player.x ? 1 : -1) * 8;
           }
@@ -1840,8 +1844,8 @@
         scheduleSimulationAction(() => {
           screenShake = 16;
           activeVisuals.push(new GroundCrack(player.x, player.y, sk.range, cls.color));
-          for (const d of duendes) {
-            if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
+          for (const d of getCombatTargets()) {
+            if (attackDistance(d, player.x, player.y) <= sk.range) {
               d.takeDamage(sk.dmg, damageSource());
               d.vy = -8;
             }
@@ -1853,8 +1857,8 @@
       } else if (sk.type === 'shield_bash') {
         audio.playSlam();
         activeVisuals.push(new ShieldShock(player.x + Math.cos(angle)*25, player.y - 30 + Math.sin(angle)*25, angle, sk.range, cls.color, 5));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) {
             d.takeDamage(sk.dmg, damageSource());
             d.vx = Math.cos(angle) * sk.knockback;
             d.vy = -4;
@@ -1865,8 +1869,8 @@
         EncounterMemory.notifyAoE();
         screenShake = 14;
         activeVisuals.push(new GroundCrack(player.x, player.y, sk.range, cls.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) {
             d.takeDamage(sk.dmg, damageSource());
             d.vy = -10;
           }
@@ -1876,8 +1880,8 @@
         player.vx = Math.cos(angle) * sk.speed;
         player.vy = -3;
         activeVisuals.push(new DashGhost(player.x, player.y, cls.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= 80) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= 80) {
             d.takeDamage(sk.dmg, damageSource());
             d.vx = player.vx * 1.3;
           }
@@ -1887,8 +1891,8 @@
         EncounterMemory.notifyAoE();
         screenShake = 18;
         activeVisuals.push(new GroundCrack(tx, groundY, sk.range, cls.color));
-        for (const d of duendes) {
-          if (Math.abs(d.x - tx) <= sk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackHorizontalDistance(d, tx) <= sk.range) {
             d.takeDamage(sk.dmg, damageSource());
             d.vy = -12;
           }
@@ -1902,31 +1906,31 @@
         player.vx = 0; player.vy = 0;
         setPlayerTeleportPosition(tx, ty);
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.range, cls.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'meteor') {
         audio.playSlam();
         EncounterMemory.notifyAoE();
         screenShake = 20;
         activeVisuals.push(new MeteorImpact(tx, ty, sk.aoe, sk.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - tx, d.y - ty) <= sk.aoe) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, tx, ty) <= sk.aoe) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'holy_burst') {
         audio.playMagic();
         player.heal(sk.heal);
         EncounterMemory.notifyAoE();
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.range, cls.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'divine_pillar') {
         audio.playMagic();
         screenShake = 12;
         activeVisuals.push(new DivinePillar(tx, sk.width, cls.color));
-        for (const d of duendes) {
-          if (Math.abs(d.x - tx) <= sk.width) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackHorizontalDistance(d, tx) <= sk.width) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'sanctuary') {
         audio.playMagic();
@@ -1934,14 +1938,14 @@
         EncounterMemory.notifyAoE();
         screenShake = 18;
         activeVisuals.push(new DivinePillar(player.x, sk.range, cls.color));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'fast_stab') {
         audio.playSword();
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, sk.range, cls.color, 4));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'multi_dagger') {
         audio.playSword();
@@ -1953,8 +1957,8 @@
         activeVisuals.push(new DashGhost(player.x, player.y, cls.color));
         setPlayerTeleportPosition(tx + (tx > player.x ? -25 : 25), ty);
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, 65, cls.color, 4));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - tx, d.y - ty) <= 60) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, tx, ty) <= 60) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'blade_flurry') {
         audio.playSword();
@@ -1963,14 +1967,14 @@
             activeVisuals.push(new SlashArc(player.x, player.y - 30, Math.random()*Math.PI*2, sk.range, cls.color, 3.5));
           }, i * 60);
         }
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'scythe_sweep') {
         audio.playSword();
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, sk.range, cls.color, 4));
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.range) {
             d.takeDamage(sk.dmg, damageSource());
             player.heal(sk.lifesteal);
           }
@@ -1981,8 +1985,8 @@
       } else if (sk.type === 'bone_spikes') {
         audio.playSlam();
         activeVisuals.push(new BoneSpikesVisual(tx, groundY, sk.range));
-        for (const d of duendes) {
-          if (Math.abs(d.x - tx) <= sk.range) {
+        for (const d of getCombatTargets()) {
+          if (attackHorizontalDistance(d, tx) <= sk.range) {
             d.takeDamage(sk.dmg, damageSource());
             d.vy = -9;
           }
@@ -1993,8 +1997,8 @@
         screenShake = 16;
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.aoe, cls.color));
         let hits = 0;
-        for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.aoe) {
+        for (const d of getCombatTargets()) {
+          if (attackDistance(d, player.x, player.y) <= sk.aoe) {
             d.takeDamage(sk.dmg, damageSource());
             hits++;
           }
@@ -2167,10 +2171,11 @@
         this.x += this.vx; this.y += this.vy;
         if (this.x < 0 || this.x > width || this.y < 0 || this.y > groundY) this.dead = true;
 
-        const hits = duendes.filter(d => !d.dead && !this.hitEnemies.has(d))
-          .map(d => ({ d, t: segmentCircleHit(source.x, source.y, this.x, this.y, d.x, d.y - 20, this.size + 14) }))
+        const hits = getCombatTargets().filter(d => !d.dead && !this.hitEnemies.has(d))
+          .map(d => ({ d, t: projectileTargetHit(source.x, source.y, this.x, this.y, d, this.size, this.size + 14) }))
           .filter(hit => hit.t !== null).sort((a, b) => a.t - b.t);
         for (const { d } of hits) {
+          if (gameState !== 'PLAYING') break;
           this.hitEnemies.add(d);
           d.takeDamage(this.dmg, source);
           if (!this.piercing) { this.dead = true; break; }
@@ -2200,10 +2205,11 @@
         this.x += this.vx; this.y += this.vy;
         if (this.x < 0 || this.x > width || this.y < 0 || this.y > groundY) this.dead = true;
 
-        const hits = duendes.filter(d => !d.dead && !this.hitEnemies.has(d))
-          .map(d => ({ d, t: segmentCircleHit(source.x, source.y, this.x, this.y, d.x, d.y - 20, 25) }))
+        const hits = getCombatTargets().filter(d => !d.dead && !this.hitEnemies.has(d))
+          .map(d => ({ d, t: projectileTargetHit(source.x, source.y, this.x, this.y, d, 22, 25) }))
           .filter(hit => hit.t !== null).sort((a, b) => a.t - b.t);
         for (const { d } of hits) {
+          if (gameState !== 'PLAYING') break;
           this.hitEnemies.add(d);
           d.takeDamage(this.dmg, source);
           d.vx = this.vx * 0.4;
@@ -2737,6 +2743,7 @@
       }
 
       beginDevour(corpse) {
+        if (this.isBossVessel || BossEncounter.active) return;
         this.cancelOffense();
         corpse.reserved = true;
         corpse.reservedBy = this;
@@ -2777,7 +2784,7 @@
       }
 
       takeDamage(amount, source = null) {
-        if (this.dead || isRunFinished() || !Number.isFinite(amount) || amount <= 0) return;
+        if (this.dead || isRunFinished() || gameState === 'BOSS_REVEAL' || this.currentState === 'FLEE_KING' || !Number.isFinite(amount) || amount <= 0) return;
         if (this.type === 'shieldbearer' && this.isShieldGuardActive() && source && Number.isFinite(source.x) && Number.isFinite(source.y)) {
           const forward = (source.x - this.x) * this.guardFacing;
           const vertical = source.y - (this.y - 30 * this.scale);
@@ -2822,6 +2829,7 @@
         }
 
         if (this.hp <= 0) {
+          if (this.isBossVessel) { BossEncounter.begin(this); return; }
           this.dead = true;
           this.buffActive = false;
           this.buffTimer = 0;
@@ -4019,7 +4027,7 @@
       }
 
       update(dt) {
-        if (this.dead || isRunFinished()) return;
+        if (this.dead || isRunFinished() || BossEncounter.active) return;
         this.validateDevourReservation(); // Antes de que la reevaluación pueda reemplazar DEVOUR.
         this.buffTimer = Math.max(0, this.buffTimer - dt);
         this.buffActive = this.buffTimer > 0;
@@ -4129,6 +4137,12 @@
 
       draw(c) {
         c.save(); // Scope general del duende; se restaura al final de draw().
+        if (this.currentState === 'KING_WITNESS') {
+          const fear = kingEase((BossEncounter.timer - 500) / 800);
+          c.translate(this.x + Math.sin(BossEncounter.timer * 0.063) * fear, this.y);
+          c.scale(1, 1 - fear * 0.22); // Se encoge/agacha, conservando su silueta y equipo.
+          c.translate(-this.x, -this.y);
+        }
 
         this.drawSupportEffects(c);
         if (this.movementType === 'flying') {
@@ -4477,6 +4491,392 @@
       coyoteTimer = 0;
     }
 
+
+    // ETAPA 11A: encuentro de presentación, separado de Utility AI y de sus traits.
+    // Brute usa scale=1.35; el Rey tiene anatomía propia a 2x esa referencia.
+    const KING_SCALE = 1.35 * 2;
+    const kingClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const kingEase = t => { t = kingClamp(t, 0, 1); return t*t*(3-2*t); };
+
+    class GoblinKing {
+      constructor(x, y, facing) {
+        this.x=x; this.y=y; this.facing=facing || 1;
+        this.scale=KING_SCALE;
+        this.vx=0; this.vy=0;
+        this.maxHp=750; // PROVISIONAL: prueba de hitbox en 11A, sin escalado del Director.
+        this.hp=this.maxHp; this.dead=false; this.hitFlash=0;
+        this.currentState='KING_FORMING';
+        this.runId=currentRunId;
+      }
+      getHitboxes() {
+        const s=this.scale;
+        return [
+          {x:this.x-12*s,y:this.y-46*s,w:24*s,h:44*s},
+          {x:this.x+(this.facing>0 ? 0 : -14*s),y:this.y-57*s,w:14*s,h:15*s}
+        ]; // Masa central y cabeza; los brazos/arma extendidos no son hitbox.
+      }
+      takeDamage(amount) {
+        if (this.dead || this.runId!==currentRunId || gameState!=='PLAYING' ||
+            this.currentState!=='KING_IDLE' || !Number.isFinite(amount) || amount<=0) return false;
+        this.hp=Math.max(0,this.hp-amount); this.hitFlash=100;
+        audio.playHit();
+        damageNumbers.push(new DamageNumber(this.x,this.y-58*this.scale,`-${amount}`,'#fff'));
+        if (this.hp===0) {
+          this.dead=true;
+          PlayerBehaviorMemory.notifyKill();
+          document.getElementById('killCounter').textContent=`Bajas: ${RunStats.totalKills}`;
+          finishRun(true); // Muerte provisional; 11B añadirá combate, no otra ronda.
+        }
+        return true;
+      }
+      update(dt) {
+        if (isRunFinished()) return;
+        this.hitFlash=Math.max(0,this.hitFlash-dt);
+        this.vx=this.vy=0; // En 11A permanece anclado, sin física ni ataques del Brute.
+        if (this.currentState==='KING_IDLE') this.facing=player.x>=this.x ? 1 : -1;
+      }
+      line(c,points,color,width) {
+        c.strokeStyle=color; c.lineWidth=width; c.beginPath();
+        points.forEach(([x,y],i)=>i ? c.lineTo(x,y) : c.moveTo(x,y)); c.stroke();
+      }
+      polygon(c,points,fill,stroke='#111820') {
+        c.fillStyle=fill; c.strokeStyle=stroke; c.lineWidth=1;
+        c.beginPath(); points.forEach(([x,y],i)=>i ? c.lineTo(x,y) : c.moveTo(x,y));
+        c.closePath(); c.fill(); c.stroke();
+      }
+      drawKingBack(c,p,t) {
+        if (p<=0) return;
+        c.save(); c.globalAlpha*=p;
+        const sway=Math.sin(t*0.002)*2;
+        this.polygon(c,[[-9,-43],[-21,-36],[-26+sway,-9],[-19,-15],[-16+sway,-5],[-10,-14],[-6,-35]],'#343139');
+        this.line(c,[[-11,-21],[-17,-35],[-11,-49]],'#c8b99a',2.2);
+        for(let i=0;i<4;i++) this.polygon(c,[[-15+i,-31-i*5],[-24-i*0.7,-38-i*5],[-10+i,-36-i*5]],'#bcb49c');
+        this.line(c,[[-15,-42],[-26,-34],[-29,-25]],'#8a7255',0.8);
+        this.polygon(c,[[-31,-28],[-25,-28],[-24,-23],[-28,-20],[-32,-24]],'#ddd0ac');
+        c.restore();
+      }
+      drawKingBody(c,p,legs,t) {
+        const breath=Math.sin(t*0.003)*0.7*p;
+        this.line(c,[[-2,-23],[-8-4*legs,-11],[ -12-3*legs,0]],'#6d8063',2.2+4*legs);
+        this.line(c,[[3,-23],[9+2*legs,-12],[14+2*legs,0]],'#829074',2.2+3*legs);
+        this.polygon(c,[[-14,0],[-19,1],[-8,1],[-7,-3]],'#c8b99a');
+        this.polygon(c,[[11,-3],[10,1],[21,1],[16,-2]],'#c8b99a');
+        this.polygon(c,[[-4-7*p,-44+breath],[4+5*p,-45+breath],[12*p,-31], [6+3*p,-20],[-8-3*p,-22],[-13*p,-34]],this.hitFlash>0?'#fff':'#657554');
+        this.line(c,[[-5,-40],[2,-32],[-6,-25]],'#202c26',1.8);
+        this.line(c,[[-11,-37],[10,-29]],'#9b8060',2);
+        this.polygon(c,[[-11,-25],[10,-24],[13,-13],[5,-17],[0,-11],[-5,-17],[-13,-15]],'#453635');
+        for(let i=0;i<3;i++) this.line(c,[[-6+i*6,-24],[-7+i*6,-18]],'#d3c8a5',1.5);
+      }
+      drawKingMainArm(c,p,t) {
+        // Brazo derecho grotesco: articulaciones crecen por separado, no escala uniforme.
+        const tremor=(1-p)*Math.sin(t*0.081)*3;
+        const shoulder=[9,-40], elbow=[13+13*p+tremor,-28+3*p], hand=[15+15*p,-19+12*p];
+        this.line(c,[shoulder,elbow,hand],this.hitFlash>0?'#fff':'#75825d',2.2+8*p);
+        this.line(c,[[12,-42],[18+7*p,-36],[15+12*p,-26]],'#b6aa82',1+p);
+        for(let i=0;i<3;i++) this.line(c,[[hand[0]-3+i*3,hand[1]], [hand[0]-4+i*3,hand[1]+5+p]],'#ddd0a8',1.3);
+        if(p>0.2) this.polygon(c,[[8,-43],[15,-46],[21,-39],[14,-37]],'#403c43');
+      }
+      drawKingSecondaryArm(c,p,t) {
+        const j=(1-p)*Math.sin(t*0.097)*2;
+        this.line(c,[[-9,-39],[-18-j-3*p,-30],[-24-3*p,-31]],'#89947a',2+2*p);
+        this.line(c,[[-13,-38],[-19,-34]],'#c4b997',2);
+      }
+      drawKingWeapon(c,p) {
+        if(p<=0) return;
+        c.save(); c.globalAlpha*=p;
+        this.line(c,[[-29,-5],[-27,-48]],'#72583d',2.5);
+        this.polygon(c,[[-33,-49],[-28,-57],[-22,-52],[-20,-44],[-28,-43]],'#b5ad94');
+        this.line(c,[[-31,-49],[-24,-45],[-30,-44]],'#302c31',1.5);
+        this.line(c,[[-27,-32],[-34,-23],[-32,-17]],'#8b3e38',1.2);
+        c.restore();
+      }
+      drawKingHead(c,p,roar) {
+        if(p<1) {
+          c.save(); c.globalAlpha*=1-p; c.strokeStyle='#8b9572'; c.lineWidth=2.2;
+          c.beginPath(); c.arc(7,-48,6,0,Math.PI*2); c.stroke(); c.restore();
+        }
+        if(p<=0) return;
+        c.save(); c.globalAlpha*=p;
+        const jaw=roar*5;
+        this.polygon(c,[[1,-51],[4,-57],[13,-55],[17,-49],[13,-43+jaw],[4,-44+jaw]],'#8b9572');
+        if(roar>0) this.polygon(c,[[5,-47],[14,-48],[12,-43+jaw],[5,-44+jaw]],'#171418');
+        this.line(c,[[5,-45+jaw],[2,-49],[4,-42+jaw]],'#eee1ba',1.5);
+        this.line(c,[[12,-44+jaw],[16,-48],[14,-42+jaw]],'#eee1ba',1.5);
+        this.line(c,[[5,-51],[8,-51]],'#f9bc69',1.2);
+        this.line(c,[[11,-51],[13,-52]],'#d8f3bd',1.1);
+        if(p>0) {
+          c.save(); c.globalAlpha*=p;
+          this.polygon(c,[[0,-54],[-2,-62],[4,-57],[6,-65],[9,-57],[13,-61],[14,-54]],'#c5baa0');
+          this.line(c,[[0,-54],[13,-54]],'#5a4940',1.5);
+          c.restore();
+        }
+        c.restore(); // Cabeza/corona crecen únicamente en HEAD_CROWN.
+      }
+      draw(c,parts=null) {
+        const p=parts || {arm:1,torso:1,legs:1,head:1};
+        const t=BossEncounter.timer;
+        const growth=0.37+0.63*Math.max(p.torso,p.legs);
+        const roar=this.currentState==='KING_ROAR' ? Math.sin(kingClamp((t-3900)/650,0,1)*Math.PI) : 0;
+        c.save(); // Anatomía local del Rey, independiente de Duende.draw().
+        c.translate(this.x,this.y); c.scale(this.facing*this.scale*growth,this.scale*growth);
+        c.lineCap='round'; c.lineJoin='round';
+        if(!parts) c.translate(Math.sin(simulationTime*0.002)*0.3,-Math.sin(simulationTime*0.003)*0.5);
+        this.drawKingBack(c,p.legs,simulationTime);
+        this.drawKingWeapon(c,p.torso);
+        this.drawKingSecondaryArm(c,p.torso,simulationTime);
+        this.drawKingBody(c,p.torso,p.legs,simulationTime);
+        this.drawKingHead(c,p.head,roar);
+        this.drawKingMainArm(c,p.arm,simulationTime);
+        c.restore();
+      }
+    }
+
+    const BossEncounter = {
+      active:false, vessel:null, king:null, timer:0, phase:'HIDDEN',
+      vesselType:null, roarPlayed:false, runId:0, soundNodes:[],
+      origin:null, destination:null, relocationStart:500, spaceLimited:false,
+      prepare(queue) {
+        this.reset();
+        this.runId=currentRunId;
+        // El primer terrestre ordinario ya pertenece a la cola original de R6.
+        this.vesselType=queue.find(type=>['scout','warrior','brute'].includes(type));
+      },
+      assign(enemy) {
+        if(RoundManager.currentRoundIndex===5 && this.runId===currentRunId && !this.vessel && enemy.type===this.vesselType) {
+          this.vessel=enemy;
+          enemy.isBossVessel=true;
+          enemy.devourable=false;
+        }
+      },
+      reset() {
+        for(const node of this.soundNodes) { try { node.stop(); } catch {} }
+        this.soundNodes=[];
+        this.active=false; this.vessel=null; this.king=null; this.timer=0;
+        this.phase='HIDDEN'; this.vesselType=null; this.roarPlayed=false;
+        this.origin=this.destination=null; this.spaceLimited=false; this.relocationStart=500;
+      },
+      findSpace(preferredX) {
+        // Espacio para toda la silueta, no solo la pequeña hitbox del recipiente.
+        const half=34*KING_SCALE, tall=66*KING_SCALE;
+        const solids=[...platforms,...obstacles.filter(o=>!o.broken)];
+        const candidates=[];
+        // Primero silueta completa; en espacios estrechos, masa corporal y apoyo.
+        for(const clearance of [half,17*KING_SCALE]) {
+        for(const surface of [{x:0,y:groundY,w:width},...platforms]) {
+          if(surface.y<tall+8) continue;
+          for(let x=half+8;x<=width-half-8;x+=8) {
+            if(x-17*KING_SCALE<surface.x || x+17*KING_SCALE>surface.x+surface.w) continue;
+            const box={x:x-clearance,y:surface.y-tall,w:clearance*2,h:tall-2};
+            if(solids.some(o=>box.x<o.x+o.w && box.x+box.w>o.x && box.y<o.y+o.h && box.y+box.h>o.y)) continue;
+            candidates.push({x,y:surface.y,score:Math.abs(x-preferredX)+(surface.y===groundY?0:width)});
+          }
+        }
+        if(candidates.length) break;
+        }
+        candidates.sort((a,b)=>a.score-b.score);
+        this.spaceLimited=candidates.length===0;
+        // Ventanas menores que la propia silueta: conservar escala y coordenadas finitas.
+        return candidates[0] || {x:kingClamp(preferredX,Math.min(half,width/2),Math.max(width-half,width/2)),y:groundY};
+      },
+      begin(vessel) {
+        if(this.active || vessel!==this.vessel || this.runId!==currentRunId) return;
+        this.active=true; this.timer=0; this.phase='SILENCE';
+        gameState='BOSS_REVEAL';
+        RoundManager.spawnQueue.length=0;
+        // Cancelación sin kills, cadáveres ni estadísticas de interrupción artificiales.
+        clearRoundCombat();
+        activeVisuals.length=0;
+        for(const d of duendes) {
+          d.cancelOffense(); d.vx=d.vy=0;
+          d.targetCorpse=null; d.isDevouring=false; d.devourTimer=0;
+          d.isTransforming=false; d.transformTimer=0;
+          d.currentState=d===vessel ? 'BOSS_REVEAL' : 'KING_WITNESS';
+          d.kingFleeDirection=d.x<width/2 ? -1 : 1;
+          d.kingWitnessX=d.x;
+        }
+        vessel.hp=0;
+        vessel.hitFlash=0; vessel.yellowFlash=0;
+        this.origin={x:vessel.x,y:vessel.y};
+        this.destination=this.findSpace(vessel.x);
+        hitStopTimer=70;
+      },
+      playRoar() {
+        if(this.roarPlayed) return;
+        this.roarPlayed=true;
+        screenShake=24;
+        for(let i=0;i<24;i++) activeVisuals.push(new StoneDebris(this.king.x,this.king.y-4));
+        const ac=audio.ctx;
+        if(ac) {
+          const now=ac.currentTime;
+          for(const [frequency,volume] of [[72,0.14],[47,0.1]]) {
+            const osc=ac.createOscillator(), gain=ac.createGain();
+            osc.type='sawtooth'; osc.frequency.setValueAtTime(frequency,now);
+            osc.frequency.exponentialRampToValueAtTime(25,now+0.8);
+            gain.gain.setValueAtTime(0.001,now);
+            gain.gain.linearRampToValueAtTime(volume,now+0.09);
+            gain.gain.exponentialRampToValueAtTime(0.001,now+0.85);
+            osc.connect(gain); gain.connect(ac.destination); osc.start(now); osc.stop(now+0.86);
+            this.soundNodes.push(osc);
+          }
+        }
+        for(const d of duendes) d.currentState='FLEE_KING';
+      },
+      update(dt) {
+        if(!this.active || isRunFinished() || this.runId!==currentRunId) return;
+        this.timer+=dt;
+        if(gameState==='BOSS_REVEAL') {
+          const t=this.timer;
+          if(this.vessel) this.vessel.vx=this.vessel.vy=0;
+          this.phase=t<500?'SILENCE':t<1600?'TREMOR':t<2100?'MAIN_ARM':t<2600?'TORSO':t<3050?'LEGS_BACK':t<3500?'HEAD_CROWN':t<3900?'BREATH':t<4550?'ROAR':'TITLE';
+          if(t>=500 && this.vessel) {
+            const p=kingEase((t-this.relocationStart)/Math.max(1,1600-this.relocationStart));
+            this.vessel.x=this.origin.x+(this.destination.x-this.origin.x)*p;
+            this.vessel.y=this.origin.y+(this.destination.y-this.origin.y)*p;
+            if(Math.floor(t/dt)%5===0 && t<3500) activeVisuals.push(new StoneDebris(this.vessel.x,this.vessel.y));
+          }
+          if(t>=1600 && !this.king) this.king=new GoblinKing(this.vessel.x,this.vessel.y,this.vessel.facing);
+          if(this.king && this.vessel) {this.king.x=this.vessel.x;this.king.y=this.vessel.y;}
+          if(t>=3500 && this.vessel && duendes.includes(this.vessel)) {
+            duendes.splice(duendes.indexOf(this.vessel),1); // Sustitución, no muerte.
+            this.king.currentState='KING_BREATH';
+          }
+          if(t>=3900) { this.king.currentState='KING_ROAR'; this.playRoar(); }
+          if(t>=5000) {
+            this.king.currentState='KING_IDLE'; this.phase='AWAKENED';
+            gameState='PLAYING';
+          }
+        }
+        for(let i=duendes.length-1;i>=0;i--) {
+          const d=duendes[i];
+          if(d===this.vessel) continue;
+          d.facing=this.king ? (this.king.x>=d.x?1:-1) : (this.vessel.x>=d.x?1:-1);
+          if(!this.roarPlayed) d.x=kingClamp(d.kingWitnessX+d.kingFleeDirection*12*kingEase((this.timer-500)/1100),25,width-25);
+          if(this.roarPlayed) {
+            d.currentState='FLEE_KING'; d.facing=d.kingFleeDirection;
+            d.x+=d.kingFleeDirection*5*(dt/FIXED_STEP_MS);
+            d.walkCycle+=0.3*(dt/FIXED_STEP_MS);
+            if(d.x<-70 || d.x>width+70) duendes.splice(i,1);
+          }
+        }
+        if(this.king) this.king.update(dt);
+      },
+      drawVessel(c) {
+        const d=this.vessel,t=this.timer;
+        if(!d || t>=3500) return;
+        if(t>=1600) {
+          const parts={arm:kingEase((t-1600)/500),torso:kingEase((t-2100)/500),legs:kingEase((t-2600)/450),head:kingEase((t-3050)/450)};
+          for(let i=2;i>=0;i--) {
+            c.save(); c.globalAlpha=i?0.12:1;
+            c.translate(i*Math.sin(t*0.071)*3,i*Math.cos(t*0.093)*2);
+            this.king.draw(c,parts); c.restore();
+          }
+          return;
+        }
+        c.save(); c.translate(d.x,d.y); c.scale(d.facing*d.scale,d.scale);
+        const shake=t<500?0:Math.sin(t*0.11)*3+Math.sin(t*0.043)*2;
+        for(let i=t<500?0:2;i>=0;i--) {
+          c.globalAlpha=i?0.18:1;
+          c.strokeStyle=d.color; c.lineWidth=2.2; c.lineCap='round';
+          c.beginPath(); c.moveTo(-8,0); c.lineTo(-2+shake,-21);
+          c.lineTo(4+shake+i,-34); c.lineTo(7+shake,-20);
+          c.moveTo(4+shake,-34); c.lineTo(-7-shake,-21);
+          c.moveTo(-2+shake,-21);c.lineTo(8,0);
+          c.moveTo(13+shake,-37);c.arc(7+shake,-37,6,0,Math.PI*2);c.stroke();
+        }
+        c.restore();
+      },
+      draw(c) {
+        if(!this.active) return;
+        if(this.timer<3500) this.drawVessel(c);
+        else if(this.king) this.king.draw(c);
+        if(this.roarPlayed && this.timer<4450) {
+          const p=kingClamp((this.timer-3900)/550,0,1);
+          c.save(); c.globalAlpha=(1-p)*0.45; c.strokeStyle='#d4c3a0'; c.lineWidth=1;
+          c.beginPath(); c.ellipse(this.king.x,this.king.y-28,30+p*170,8+p*30,0,Math.PI,Math.PI*2);c.stroke();c.restore();
+        }
+      },
+      drawHUD(c) {
+        if(this.roarPlayed && this.king) {
+          // HUD separado del panel de clase también en ventanas medianas.
+          const left=width<1150 ? Math.min(390,width*0.7) : 0;
+          const center=(left+width)/2, available=width-left;
+          c.save(); c.textAlign='center';
+          if(this.timer<5900) {
+            const a=kingClamp((this.timer-3900)/250,0,1)*kingClamp((5900-this.timer)/800,0,1);
+            c.globalAlpha=a; c.fillStyle='#ead8b7'; c.shadowColor='#633e36';c.shadowBlur=12;
+            c.font=`900 ${Math.min(48,available/11)}px Georgia, serif`;
+            c.fillText('REY DUENDE',center,height*0.28+8*(1-a));
+          }
+          const w=Math.min(500,available*0.9),x=center-w/2;
+          c.globalAlpha=kingClamp((this.timer-4200)/400,0,1);c.shadowBlur=0;
+          c.fillStyle='#141218';c.fillRect(x,42,w,13);
+          c.fillStyle='#963e3b';c.fillRect(x+2,44,(w-4)*this.king.hp/this.king.maxHp,9);
+          c.strokeStyle='#bca680';c.lineWidth=1;c.strokeRect(x,42,w,13);
+          c.font='bold 12px Georgia, serif';c.fillStyle='#e7d3b0';
+          c.fillText('REY DUENDE',center,32);
+          c.font='10px monospace';c.fillText(`${Math.ceil(this.king.hp)} / ${this.king.maxHp}`,center,69);
+          c.restore();
+        }
+        if(debugMode && this.vessel) {
+          c.save(); c.fillStyle='#ead8b7';c.font='11px monospace';c.textAlign='left';
+          const lines=['BOSS VESSEL: YES',`REVEAL PHASE: ${this.phase}`,`REVEAL TIMER: ${Math.round(this.timer)}`];
+          if(this.king) lines.push(`KING STATE: ${this.king.currentState}`,`KING HP: ${this.king.hp}/${this.king.maxHp}`,`KING X/Y: ${this.king.x.toFixed(1)} / ${this.king.y.toFixed(1)}`);
+          if(this.spaceLimited) lines.push('KING SPACE: LIMITED');
+          lines.forEach((line,i)=>c.fillText(line,Math.max(16,width-270),height-130+i*15));c.restore();
+        }
+      },
+      remapResize(ratioX,deltaY) {
+        if(!this.active) return; // El recipiente oculto ya usa el remapeo normal.
+        for(const d of duendes) if(Number.isFinite(d.kingWitnessX)) d.kingWitnessX*=ratioX;
+        if(this.origin) {this.origin.x*=ratioX;this.origin.y+=deltaY;}
+        if(this.destination) {this.destination.x*=ratioX;this.destination.y+=deltaY;}
+        if(this.king) {this.king.x*=ratioX;this.king.y+=deltaY;}
+        if(this.vessel && !duendes.includes(this.vessel)) {this.vessel.x*=ratioX;this.vessel.y+=deltaY;}
+        const actor=this.king || this.vessel;
+        this.destination=this.findSpace(actor.x);
+        if(this.timer<1600) {
+          this.origin={x:actor.x,y:actor.y};this.relocationStart=Math.max(500,this.timer);
+        } else {
+          // Corrección de apoyo visible en la nueva geometría; escala/timers intactos.
+          actor.x=this.destination.x;actor.y=this.destination.y;
+          if(this.king && this.vessel) {this.vessel.x=actor.x;this.vessel.y=actor.y;}
+        }
+      }
+    };
+
+    function getCombatTargets() {
+      if (BossEncounter.active) return BossEncounter.king && BossEncounter.king.currentState==='KING_IDLE' && !BossEncounter.king.dead ? [BossEncounter.king] : [];
+      return duendes;
+    }
+    function attackPoint(target,x,y,legacyOffset=0) {
+      if(!target.getHitboxes) return {x:target.x,y:target.y-legacyOffset};
+      return target.getHitboxes().map(b=>({x:kingClamp(x,b.x,b.x+b.w),y:kingClamp(y,b.y,b.y+b.h)}))
+        .sort((a,b)=>Math.hypot(a.x-x,a.y-y)-Math.hypot(b.x-x,b.y-y))[0];
+    }
+    function attackDistance(target,x,y,legacyOffset=0) {
+      const p=attackPoint(target,x,y,legacyOffset);return Math.hypot(p.x-x,p.y-y);
+    }
+    function attackAngleTo(target,x,y,legacyOffset=0) {
+      const p=attackPoint(target,x,y,legacyOffset);return Math.atan2(p.y-y,p.x-x);
+    }
+    function attackArcHits(target,x,y,angle,range,halfArc) {
+      if(!target.getHitboxes) return attackDistance(target,x,y,20)<=range && Math.abs(angleDiff(angle,attackAngleTo(target,x,y,20)))<halfArc;
+      return target.getHitboxes().some(b=>{
+        const points=[attackPoint(target,x,y),{x:b.x,y:b.y},{x:b.x+b.w,y:b.y},{x:b.x,y:b.y+b.h},{x:b.x+b.w,y:b.y+b.h}];
+        if(points.some(p=>Math.hypot(p.x-x,p.y-y)<=range && Math.abs(angleDiff(angle,Math.atan2(p.y-y,p.x-x)))<halfArc)) return true;
+        return [angle-halfArc,angle,angle+halfArc].some(a=>segmentBoxHit(x,y,x+Math.cos(a)*range,y+Math.sin(a)*range,b)!==null);
+      });
+    }
+    function attackHorizontalDistance(target,x) {
+      if(!target.getHitboxes) return Math.abs(target.x-x);
+      return Math.min(...target.getHitboxes().map(b=>Math.abs(kingClamp(x,b.x,b.x+b.w)-x)));
+    }
+    function projectileTargetHit(x0,y0,x1,y1,target,radius,legacyRadius) {
+      if(!target.getHitboxes) return segmentCircleHit(x0,y0,x1,y1,target.x,target.y-20,legacyRadius);
+      const hits=target.getHitboxes().map(b=>segmentBoxHit(x0,y0,x1,y1,{x:b.x-radius,y:b.y-radius,w:b.w+radius*2,h:b.h+radius*2})).filter(t=>t!==null);
+      return hits.length ? Math.min(...hits) : null;
+    }
+
     function clearSupportEffects() {
       for (const projectile of enemyProjectiles) {
         if (projectile instanceof EnemyBomb) projectile.dead = true;
@@ -4531,6 +4931,7 @@
 
     function startRun() {
       if (gameState !== 'PRE_GAME') return;
+      BossEncounter.reset();
       currentRunId++;
       scheduledActions.length = 0;
       document.getElementById('startRunBtn').classList.add('hidden');
@@ -4546,6 +4947,7 @@
     }
 
     function resetGame(goToSelection = false) {
+      BossEncounter.reset();
       currentRunId++;
       scheduledActions.length = 0;
       clearRoundCombat();
@@ -4756,7 +5158,8 @@
         }
       }
 
-      if (gameState !== 'PRE_GAME' && gameState !== 'GAME_OVER' && gameState !== 'VICTORY') {
+      BossEncounter.update(dt);
+      if (!BossEncounter.active && gameState !== 'PRE_GAME' && gameState !== 'GAME_OVER' && gameState !== 'VICTORY') {
         PlayerBehaviorMemory.update(dt, player.x, player.y, behindObstacle);
         AdaptiveDirector.update(dt);
         EncounterMemory.update();
@@ -4827,15 +5230,21 @@
       }
 
       for (let i = duendes.length - 1; i >= 0; i--) {
-        if (gameState === 'PLAYING') duendes[i].update(dt);
-        duendes[i].draw(ctx);
+        if (gameState === 'PLAYING' && !BossEncounter.active) duendes[i].update(dt);
+        if (!BossEncounter.active || duendes[i] !== BossEncounter.vessel) duendes[i].draw(ctx);
         if (duendes[i].dead) duendes.splice(i, 1);
       }
 
+      BossEncounter.draw(ctx);
       for (let i = projectiles.length - 1; i >= 0; i--) {
-        if (gameState === 'PLAYING') projectiles[i].update();
-        projectiles[i].draw(ctx);
-        if (projectiles[i].dead) projectiles.splice(i, 1);
+        const projectile = projectiles[i];
+        if (!projectile) continue;
+        if (gameState === 'PLAYING') projectile.update();
+        // Una falsa muerte/victoria puede vaciar el array desde update().
+        if (projectiles[i] === projectile) {
+          projectile.draw(ctx);
+          if (projectile.dead) projectiles.splice(i, 1);
+        }
       }
 
       for (let i = activeVisuals.length - 1; i >= 0; i--) {
@@ -4927,6 +5336,7 @@
         ctx.restore();
       }
 
+      BossEncounter.drawHUD(ctx);
       // PANEL GLOBAL F3
       if (debugMode) {
         ctx.fillStyle = 'rgba(15, 23, 42, 0.94)';
