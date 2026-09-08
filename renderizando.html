@@ -418,9 +418,9 @@
       { round: 2, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'archer'] },
       { round: 3, baseEnemies: ['scout', 'warrior', 'brute', 'archer', 'shieldbearer'] },
       { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] },
-      { round: 5, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] },
+      { round: 5, baseEnemies: ['scout', 'warrior', 'bomber', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] },
       // TODO: REEMPLAZAR RONDA 6 POR BOSS REY DUENDE
-      { round: 6, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] }
+      { round: 6, baseEnemies: ['scout', 'warrior', 'bomber', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] }
     ];
 
     // --- MEMORIA COLECTIVA DE COMBATE ---
@@ -823,8 +823,8 @@
       }
 
       update(dt) {
-        // Caída sencilla solo del cadáver alado; no interviene en DEVOUR.
-        if (this.type === 'winged' && this.y < groundY) {
+        // Caída sencilla de cadáveres voladores; no interviene en DEVOUR.
+        if ((this.type === 'winged' || this.type === 'bomber') && this.y < groundY) {
           this.fallVelocity = Math.min(10, this.fallVelocity + 0.35 * (dt / FIXED_STEP_MS));
           this.y = Math.min(groundY, this.y + this.fallVelocity * (dt / FIXED_STEP_MS));
         }
@@ -1298,11 +1298,16 @@
             const remappedLength = Math.hypot(enemy.vx * ratioX, enemy.vy);
             if (remappedLength > 0) { enemy.vx *= ratioX * speed / remappedLength; enemy.vy *= speed / remappedLength; }
           }
+          if (Number.isFinite(enemy.lockedBombX)) enemy.lockedBombX = clampX(enemy.lockedBombX * ratioX, 10);
+          if (Number.isFinite(enemy.lockedBombY)) enemy.lockedBombY += deltaY;
           for (const trail of enemy.flightTrails) remapPoint(trail);
           enemy.validateFlyingPhysics();
         }
       }
-      for (const entity of [...projectiles, ...enemyProjectiles, ...activeVisuals, ...damageNumbers]) remapPoint(entity);
+      for (const entity of [...projectiles, ...enemyProjectiles, ...activeVisuals, ...damageNumbers]) {
+        if (entity instanceof EnemyBomb) entity.remapResize(ratioX, deltaY);
+        else remapPoint(entity);
+      }
       if (Number.isFinite(PlayerBehaviorMemory.lastRecordedX)) PlayerBehaviorMemory.lastRecordedX *= ratioX;
       validatePlayerPhysics();
     }
@@ -2332,6 +2337,169 @@
       arrowSpeed: 10, retreatRange: 180, minimumRange: 220, preferredRange: 260
     };
 
+    // Bomba física independiente del propietario; comparte la limpieza de proyectiles.
+    class EnemyBomb {
+      constructor(x, y, targetX, targetY, damage, explosionRadius = 65) {
+        this.x = x; this.y = y; this.vy = -1.8; this.gravity = 0.22;
+        this.radius = 6; this.damage = damage; this.explosionRadius = explosionRadius;
+        this.fuseTimer = 750; this.fuseStarted = false; this.landed = false;
+        this.dead = false; this.age = 0; this.runId = currentRunId;
+        this.sourceType = 'BOMBER'; this.damageType = 'aoe';
+        this.supportKind = null; this.supportIndex = -1; this.support = null;
+        // Tiempo de caída estimado con la misma integración discreta usada abajo.
+        const b = this.vy + this.gravity / 2;
+        const steps = Math.max(12, (-b + Math.sqrt(Math.max(0,b*b + 2*this.gravity*Math.max(0,targetY-y)))) / this.gravity);
+        this.vx = Math.max(-3.5, Math.min(3.5, (targetX-x)/steps));
+      }
+
+      remapResize(ratioX, deltaY) {
+        this.x = Math.max(this.radius,Math.min(width-this.radius,this.x*ratioX));
+        this.y += deltaY;
+        this.vx *= ratioX;
+        if (this.landed) {
+          const support = this.supportKind === 'platform' ? platforms[this.supportIndex] : this.support;
+          if (this.supportKind === 'ground') this.y = groundY-this.radius;
+          else if (support && !support.broken) {
+            this.x = Math.max(this.radius,Math.min(width-this.radius,Math.max(support.x,Math.min(support.x+support.w,this.x))));
+            this.y = support.y-this.radius;
+          } else this.landed = false;
+        }
+        if (!this.landed) {
+          // La nueva geometría puede aparecer sobre una bomba en caída.
+          // Resolver el contacto ahora evita rebotes con t=0 indefinidamente.
+          const surfaces = [
+            ...platforms.map((box,index)=>({box,kind:'platform',index})),
+            ...obstacles.filter(o=>!o.broken).map(box=>({box,kind:'pillar',index:-1})),
+            {box:{x:0,y:groundY,w:width,h:height},kind:'ground',index:-1}
+          ];
+          for (const {box,kind,index} of surfaces) {
+            if (this.x<=box.x-this.radius || this.x>=box.x+box.w+this.radius ||
+                this.y<box.y-this.radius || this.y>box.y+box.h+this.radius) continue;
+            if (kind==='pillar') {
+              const left=box.x-this.radius-0.01, right=box.x+box.w+this.radius+0.01;
+              this.x=Math.abs(this.x-left)<Math.abs(this.x-right) ? left : right;
+              this.vx=Math.sign(this.x-(box.x+box.w/2))*Math.abs(this.vx)*0.3;
+            } else if (this.vy>=0 || kind==='ground') {
+              this.y=box.y-this.radius; this.vx=this.vy=0;
+              this.landed=true; this.fuseStarted=true;
+              this.supportKind=kind; this.supportIndex=index; this.support=null;
+            } else {
+              this.y=box.y+box.h+this.radius+0.01;
+              this.vy=Math.abs(this.vy)*0.25;
+            }
+            break;
+          }
+        }
+      }
+
+      update(dt = FIXED_STEP_MS) {
+        if (this.dead) return;
+        if (this.runId !== currentRunId) { this.dead = true; return; }
+        if (gameState !== 'PLAYING') return;
+        if (![this.x,this.y,this.vx,this.vy].every(Number.isFinite)) { this.dead = true; return; }
+        this.age += dt;
+        if (this.fuseStarted) {
+          this.fuseTimer = Math.max(0,this.fuseTimer-dt);
+          if (!this.fuseTimer) { this.explode(); return; }
+        }
+        if (this.landed && this.supportKind === 'pillar' && this.support?.broken) this.landed = false;
+        if (this.landed) return;
+        this.vy += this.gravity;
+        const nx=this.x+this.vx, ny=this.y+this.vy, r=this.radius;
+        let first=null;
+        const surfaces = [
+          ...platforms.map((box,index)=>({box,kind:'platform',index})),
+          ...obstacles.filter(o=>!o.broken).map(box=>({box,kind:'pillar',index:-1})),
+          {box:{x:-100,y:groundY,w:width+200,h:height+200},kind:'ground',index:-1}
+        ];
+        for (const entry of surfaces) {
+          const box=entry.box;
+          const t=segmentBoxHit(this.x,this.y,nx,ny,{x:box.x-r,y:box.y-r,w:box.w+2*r,h:box.h+2*r});
+          if (t!==null && (!first || t<first.t)) first={...entry,t};
+        }
+        if (first) {
+          const fromY=this.y, fraction=Math.max(0,first.t-0.001);
+          this.x+=this.vx*fraction; this.y+=this.vy*fraction;
+          if (this.vy>=0 && fromY<=first.box.y-r+0.01) {
+            this.y=first.box.y-r; this.vx=this.vy=0;
+            this.landed=true; this.fuseStarted=true;
+            this.supportKind=first.kind; this.supportIndex=first.index;
+            this.support=first.kind==='pillar' ? first.box : null;
+          } else {
+            // Rebote pequeño contra pared/techo; nunca atraviesa el obstáculo.
+            if (this.vy<0 && fromY>=first.box.y+first.box.h+r-0.01) this.vy=Math.abs(this.vy)*0.25;
+            else this.vx*=-0.3;
+          }
+        } else { this.x=nx; this.y=ny; }
+        if (this.age>10000 || this.x<-80 || this.x>width+80 || this.y>groundY+100) this.dead=true;
+      }
+
+      explode() {
+        if (this.dead || gameState!=='PLAYING' || this.runId!==currentRunId) return;
+        this.dead=true; // Marcar ANTES del daño: una explosión, incluso ante invulnerabilidad.
+        activeVisuals.push(new BombBurst(this.x,this.y));
+        for (let i=0;i<12;i++) activeVisuals.push(new ArcaneParticle(this.x,this.y,i<8 ? '#fbbf24' : '#94a3b8'));
+        screenShake=Math.max(screenShake,6);
+        audio.playHit();
+        // Distancia al cuerpo: no se aplica daño si queda íntegramente fuera del radio.
+        const nearestX=Math.max(player.x-12,Math.min(player.x+12,this.x));
+        const nearestY=Math.max(player.y-60,Math.min(player.y,this.y));
+        if (Math.hypot(nearestX-this.x,nearestY-this.y)>this.explosionRadius) return;
+        const accepted=player.takeDamage(this.damage,'BOMBER');
+        if (accepted && !isRunFinished()) {
+          player.vx=(Math.sign(player.x-this.x)||player.facing)*4.5;
+          player.vy=-3.5; player.isGrounded=false; coyoteTimer=0;
+          validatePlayerPhysics();
+        }
+      }
+
+      static drawShape(c,x,y,urgency=0,size=6) {
+        c.save();
+        const spark = Math.sin(simulationTime*(0.018+urgency*0.035));
+        const shake = urgency>0 ? Math.sin(simulationTime*0.055)*urgency*1.2 : 0;
+        c.translate(x+shake,y);
+        c.fillStyle=spark>0.65 && urgency>0.4 ? '#fb923c' : '#334155';
+        c.strokeStyle='#fbbf24'; c.lineWidth=1.2;
+        c.beginPath(); c.arc(0,0,size,0,Math.PI*2); c.fill(); c.stroke();
+        c.beginPath(); c.moveTo(2,-size+1); c.quadraticCurveTo(7,-size-7,10,-size-3); c.stroke();
+        c.strokeStyle=spark>0 ? '#fff7ed' : '#f97316';
+        c.beginPath(); c.moveTo(8,-size-5); c.lineTo(13,-size-1);
+        c.moveTo(11,-size-7); c.lineTo(10,-size+1); c.stroke();
+        c.restore();
+      }
+
+      draw(c) {
+        if (this.dead) return;
+        const urgency=this.fuseStarted ? 1-this.fuseTimer/750 : 0.1;
+        EnemyBomb.drawShape(c,this.x,this.y,urgency,this.radius+urgency);
+      }
+    }
+
+    class BombBurst {
+      constructor(x,y) { this.x=x; this.y=y; this.alpha=1; }
+      update() { this.alpha=Math.max(0,this.alpha-0.075); }
+      draw(c) {
+        c.save(); c.globalAlpha=Math.max(0,this.alpha);
+        c.fillStyle='#ffedd5'; c.beginPath(); c.arc(this.x,this.y,12*this.alpha,0,Math.PI*2); c.fill();
+        c.strokeStyle='#fb923c'; c.lineWidth=1.5;
+        c.beginPath(); c.arc(this.x,this.y,12+(1-this.alpha)*24,0,Math.PI*2); c.stroke();
+        for (let i=0;i<5;i++) {
+          const angle=i*Math.PI*0.4;
+          c.fillStyle='#64748b'; c.globalAlpha=Math.max(0,this.alpha*0.35);
+          c.beginPath(); c.arc(this.x+Math.cos(angle)*18*(1-this.alpha),this.y-10-(1-this.alpha)*18+Math.sin(angle)*8,4+(1-this.alpha)*8,0,Math.PI*2); c.fill();
+        }
+        c.restore();
+      }
+    }
+
+    const BOMBER_CONFIG = {
+      name: 'Bomber', maxHp: 21, baseSpeed: 1.9, jumpForce: -13.5,
+      dmg: 12, color: '#fbbf24', scale: 0.95, movementType: 'flying',
+      visionRange: 640, hearingRange: 280, attackRange: 35,
+      predictionAccuracy: 0.3, bombPrepDuration: 750, bombLockWindow: 200,
+      bombRecoveryDuration: 2100, explosionRadius: 65
+    };
+
     const WINGED_CONFIG = {
       name: 'Winged', maxHp: 18, baseSpeed: 2.3, jumpForce: -13.5,
       dmg: 10, color: '#7dd3fc', scale: 0.9, movementType: 'flying',
@@ -2383,7 +2551,18 @@
         this.buffTimer = 0;
         this.mutationNoticeTimer = 0;
         this.lastAbsorbedType = null;
-        if (type === 'winged') {
+        if (type === 'bomber') {
+          Object.assign(this, BOMBER_CONFIG);
+          this.y = Math.max(Math.min(70, groundY), groundY - 180);
+          this.prevY = this.y;
+          this.isGrounded = false;
+          this.bombTimer = 0;
+          this.bombCooldown = 1200;
+          this.bombLocked = false;
+          this.lockedBombX = this.lockedBombY = null;
+          this.activeBomb = null;
+          this.flightTrails = [];
+        } else if (type === 'winged') {
           Object.assign(this, WINGED_CONFIG);
           this.y = Math.max(Math.min(70, groundY), groundY - 140);
           this.prevY = this.y;
@@ -2471,7 +2650,7 @@
         this.lastDamageAmount = 0;
         this.hasVisualContact = false;
 
-        this.currentState = type === 'winged' ? 'FLY_HOVER' : 'PATROL';
+        this.currentState = type === 'bomber' ? 'BOMB_HOVER' : type === 'winged' ? 'FLY_HOVER' : 'PATROL';
         this.currentTargetName = 'Ninguno';
         this.decisionTimer = 0;
         this.decisionInterval = 180 + Math.random() * 180;
@@ -2564,7 +2743,7 @@
           this.buffActive = false;
           this.buffTimer = 0;
           if (this.movementType === 'flying') {
-            this.cancelDive();
+            this.cancelFlyingAttack();
             this.flightTrails.length = 0;
           }
           if (this.type === 'shaman') {
@@ -2935,7 +3114,7 @@
           this.x = Number.isFinite(this.x) ? this.x : width / 2;
           this.y = Number.isFinite(this.y) ? this.y : Math.max(top, bottom - 140);
           this.vx = this.vy = 0;
-          this.cancelDive();
+          this.cancelFlyingAttack();
         }
         this.x = Math.max(margin, Math.min(width-margin, this.x));
         this.y = Math.max(top, Math.min(bottom, this.y));
@@ -2954,6 +3133,11 @@
           if (choices.length) { this.x=choices[0].x; this.y=choices[0].y; }
         }
         this.prevY = this.y;
+      }
+
+      cancelFlyingAttack() {
+        if (this.type === 'bomber') this.cancelBombPrep();
+        else this.cancelDive();
       }
 
       cancelDive() {
@@ -3010,6 +3194,74 @@
         if (hit) this.vx = this.vy = 0;
         this.isGrounded = false;
         if (Math.abs(this.vx)>0.1) this.facing = Math.sign(this.vx);
+        this.validateFlyingPhysics();
+      }
+
+      cancelBombPrep() {
+        this.bombLocked=false;
+        this.lockedBombX=this.lockedBombY=null;
+        this.bombTimer=0;
+        this.bombCooldown=this.bombRecoveryDuration;
+        if (this.currentState!=='DEVOUR' && !this.isTransforming) this.currentState='BOMB_REPOSITION';
+      }
+
+      updateBomberCombat(dt) {
+        if (this.dead || gameState!=='PLAYING') return;
+        if (this.currentState==='DEVOUR' || this.isDevouring || this.isTransforming) {
+          this.cancelBombPrep();
+          return;
+        }
+        this.bombCooldown=Math.max(0,this.bombCooldown-dt);
+        if (this.isStunned>0) { this.cancelBombPrep(); return; }
+        if (this.currentState==='BOMB_RELEASE') {
+          this.bombTimer=Math.max(0,this.bombTimer-dt);
+          if (!this.bombTimer) this.currentState='BOMB_RECOVERY';
+          return;
+        }
+        if (this.currentState==='BOMB_RECOVERY') {
+          if (!this.bombCooldown) this.currentState='BOMB_REPOSITION';
+          return;
+        }
+        if (this.currentState==='BOMB_PREP') {
+          if (!this.bombLocked) {
+            this.lockedBombX=Math.max(12,Math.min(width-12,player.x+player.vx*10*this.predictionAccuracy));
+            this.lockedBombY=player.y-6;
+          }
+          this.bombTimer=Math.max(0,this.bombTimer-dt);
+          if (this.bombTimer<=this.bombLockWindow) this.bombLocked=true;
+          if (!this.bombTimer) {
+            if (!this.activeBomb || this.activeBomb.dead) {
+              this.activeBomb=new EnemyBomb(this.x+18*this.facing,this.y-32*this.scale,this.lockedBombX,this.lockedBombY,this.effectiveDamage(),this.explosionRadius);
+              enemyProjectiles.push(this.activeBomb);
+            }
+            this.currentState='BOMB_RELEASE'; this.bombTimer=180;
+            this.bombCooldown=this.bombRecoveryDuration;
+          }
+          return;
+        }
+        const dx=player.x-this.x, heightAbove=player.y-this.y;
+        if (this.hasVisualContact && !this.bombCooldown && (!this.activeBomb || this.activeBomb.dead) &&
+            Math.abs(dx)<155 && heightAbove>95 && heightAbove<300) {
+          this.currentState='BOMB_PREP'; this.bombTimer=this.bombPrepDuration;
+          this.bombLocked=false; this.lockedBombX=player.x; this.lockedBombY=player.y-6;
+          this.facing=Math.sign(dx)||this.facing;
+        } else this.currentState=Math.abs(dx)<110 ? 'BOMB_HOVER' : 'BOMB_REPOSITION';
+      }
+
+      updateBomberMovement(dt) {
+        this.validateFlyingPhysics();
+        if (this.currentState==='BOMB_PREP' || this.currentState==='BOMB_RELEASE' || this.isStunned>0) {
+          // Frenado suave; la mecha y el brazo transmiten la preparación.
+          this.vx*=0.75; this.vy*=0.75;
+          if (!this.flightWorldHit(this.x+this.vx,this.y+this.vy)) { this.x+=this.vx; this.y+=this.vy; }
+        } else {
+          const phase=simulationTime*0.0016+this.flankSide;
+          const side=Math.sign(this.x-player.x)||this.flankSide;
+          this.moveFlyingToward(player.x+side*55+Math.sin(phase)*16,
+            Math.min(groundY-165,player.y-180)+Math.sin(phase*0.8)*10);
+        }
+        this.isGrounded=false;
+        if (this.consumedTraits.scout>0 && Math.abs(this.vx)>1.8) this.ghostTrails.push({x:this.x,y:this.y,facing:this.facing,alpha:0.45});
         this.validateFlyingPhysics();
       }
 
@@ -3210,6 +3462,7 @@
       }
 
       updateCombat(dt) {
+        if (this.type === 'bomber') { this.updateBomberCombat(dt); return; }
         if (this.type === 'winged') { this.updateWingedCombat(dt); return; }
         if (this.type === 'shaman') { this.updateShamanCombat(dt); return; }
         if (this.isStunned > 0 || this.isTransforming || gameState === 'GAME_OVER' || gameState === 'VICTORY') return;
@@ -3334,7 +3587,8 @@
             if (this.currentState === 'DEVOUR') {
               // El case existente libera una reserva que dejó de ser válida.
             } else {
-              this.updateFlyingMovement(dt);
+              if (this.type === 'bomber') this.updateBomberMovement(dt);
+              else this.updateFlyingMovement(dt);
               return;
             }
           }
@@ -3699,6 +3953,29 @@
         this.updateMovement(dt);
       }
 
+      drawBomberGear(c,x,y,scale) {
+        const preparing=this.currentState==='BOMB_PREP';
+        const progress=preparing ? 1-this.bombTimer/this.bombPrepDuration : 0;
+        const flap=Math.sin(simulationTime*0.019)*5;
+        c.strokeStyle='#d6b98c'; c.lineWidth=2*scale;
+        // Alas cortas, arnés y bolsa: silueta distinta a las alas largas de Winged.
+        for (const side of [-1,1]) {
+          c.beginPath(); c.moveTo(x,y);
+          c.quadraticCurveTo(x+side*14*scale,y-(18+flap)*scale,x+side*23*scale,y-5*scale);
+          c.lineTo(x+side*9*scale,y+3*scale); c.stroke();
+        }
+        c.fillStyle='#78563b'; c.strokeStyle='#d6b98c';
+        c.beginPath(); c.moveTo(x-10*scale,y+2*scale); c.lineTo(x+8*scale,y+3*scale);
+        c.lineTo(x+10*scale,y+20*scale); c.lineTo(x-11*scale,y+18*scale); c.closePath(); c.fill(); c.stroke();
+        c.beginPath(); c.moveTo(x-8*scale,y-6*scale); c.lineTo(x+8*scale,y+19*scale); c.stroke();
+        if (preparing) {
+          const handX=x+this.facing*(17+progress*3)*scale, handY=y+(5-progress*12)*scale;
+          c.strokeStyle=this.color;
+          c.beginPath(); c.moveTo(x,y); c.lineTo(handX,handY); c.stroke();
+          EnemyBomb.drawShape(c,handX,handY,progress,(4+progress*2)*scale);
+        }
+      }
+
       drawWingedWings(c, x, y, scale) {
         const state=this.currentState;
         const folded=state==='DIVE' ? 0.18 : state==='DIVE_PREP' ? 0.48 : 1;
@@ -3850,8 +4127,10 @@
           if (this.currentState==='DIVE') tilt=Math.atan2(this.vy,this.vx)+Math.PI/2;
           if (this.currentState==='DIVE_PREP') tilt=Math.atan2(this.lockedDiveY-this.y,this.lockedDiveX-this.x)+Math.PI/2;
           const shake=this.currentState==='CRASH_STUN' ? Math.sin(simulationTime*0.06)*Math.min(2,this.isStunned/200) : 0;
+          if (this.type==='bomber' && this.currentState==='BOMB_PREP') tilt=this.facing*(0.1+0.2*(1-this.bombTimer/this.bombPrepDuration));
           c.translate(posX+shake,shoulderY); c.rotate(tilt); c.translate(-posX,-shoulderY);
-          this.drawWingedWings(c,posX,shoulderY,s);
+          if (this.type==='bomber') this.drawBomberGear(c,posX,shoulderY,s);
+          else this.drawWingedWings(c,posX,shoulderY,s);
         }
         c.beginPath(); c.arc(posX, headY, 6 * s, 0, Math.PI * 2); c.stroke();
         c.beginPath();
@@ -3988,13 +4267,14 @@
           let debugBoxH = this.isMutated ? 58 : 48;
           if (this.type === 'shaman') debugBoxH += 33;
           if (this.type === 'winged') debugBoxH += 44;
+          if (this.type === 'bomber') debugBoxH += 33;
           if (this.buffActive) debugBoxH += 11;
           if (this.type === 'archer') debugBoxH += 22;
           if (this.type === 'shieldbearer') debugBoxH += 44;
           if (this.isStunned > 0 || this.isTransforming) debugBoxH += 11;
 
           const dbgX = posX - debugBoxW / 2;
-          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : this.type === 'shaman' ? 33 : this.type === 'winged' ? 44 : 0) - (this.buffActive ? 11 : 0);
+          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : this.type === 'shaman' ? 33 : this.type === 'winged' ? 44 : this.type === 'bomber' ? 33 : 0) - (this.buffActive ? 11 : 0);
 
           c.fillStyle = 'rgba(15, 23, 42, 0.9)';
           c.strokeStyle = '#38bdf8';
@@ -4039,6 +4319,14 @@
             c.fillStyle = '#fbbf24';
             c.fillText('BUFF: ' + (this.buffTimer/1000).toFixed(1)+'s', dbgX+5,currentLineY);
             currentLineY += 11;
+          }
+          if (this.type === 'bomber') {
+            c.fillStyle='#fde68a';
+            const phase=this.currentState==='BOMB_PREP' ? 'PREP' :
+              (this.activeBomb && !this.activeBomb.dead ? 'ACTIVE' : this.bombCooldown>0 ? 'RECOVERY' : 'READY');
+            c.fillText('BOMB: '+phase,dbgX+5,currentLineY);
+            c.fillText('TARGET X: '+(this.lockedBombX===null ? '--' : Math.round(this.lockedBombX)),dbgX+5,currentLineY+11);
+            c.fillText('CD: '+(this.bombCooldown/1000).toFixed(1)+'s',dbgX+5,currentLineY+22);
           }
           if (this.type === 'winged') {
             c.fillStyle='#bae6fd';
@@ -4093,13 +4381,17 @@
     }
 
     function clearSupportEffects() {
+      for (const projectile of enemyProjectiles) {
+        if (projectile instanceof EnemyBomb) projectile.dead = true;
+      }
       player.shamanSlowTimer = 0;
       for (const enemy of duendes) {
         enemy.buffActive = false;
         enemy.buffTimer = 0;
         enemy.mutationNoticeTimer = 0;
         if (enemy.movementType === 'flying') {
-          enemy.cancelDive();
+          enemy.cancelFlyingAttack();
+          if (enemy.type === 'bomber') enemy.activeBomb = null;
           enemy.flightTrails.length = 0;
           enemy.vx = enemy.vy = 0;
         }
