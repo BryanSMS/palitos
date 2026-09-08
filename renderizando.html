@@ -417,10 +417,10 @@
       { round: 1, baseEnemies: ['scout', 'scout', 'warrior', 'warrior'] },
       { round: 2, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'archer'] },
       { round: 3, baseEnemies: ['scout', 'warrior', 'brute', 'archer', 'shieldbearer'] },
-      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'brute', 'archer', 'shieldbearer'] },
-      { round: 5, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer'] },
+      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman'] },
+      { round: 5, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman'] },
       // TODO: REEMPLAZAR RONDA 6 POR BOSS REY DUENDE
-      { round: 6, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'archer', 'archer', 'shieldbearer'] }
+      { round: 6, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'archer', 'shieldbearer', 'shaman'] }
     ];
 
     // --- MEMORIA COLECTIVA DE COMBATE ---
@@ -1392,6 +1392,7 @@
         EncounterMemory.notifyHeal();
       },
 
+      shamanSlowTimer: 0,
       takeDamage(dmg, sourceType = 'UNKNOWN') {
         if (gameState !== 'PLAYING' || this.invuln > 0 || !Number.isFinite(dmg) || dmg <= 0) return false;
         this.lastDamageSource = typeof sourceType === 'string' ? sourceType : 'UNKNOWN';
@@ -1416,16 +1417,18 @@
         if (!validatePlayerPhysics()) return;
         if (gameState === 'GAME_OVER' || gameState === 'VICTORY') return;
 
+        this.shamanSlowTimer = Math.max(0, this.shamanSlowTimer - FIXED_STEP_MS);
         const c = CLASSES[currentClassKey];
+        const effectiveSpeed = c.speed * (this.shamanSlowTimer > 0 ? 0.75 : 1);
         this.prevY = this.y;
         if (this.invuln > 0) this.invuln--;
         if (this.attackAnim > 0) this.attackAnim -= 0.12;
 
         if (keys.left && !keys.right) {
-          this.vx = -c.speed;
+          this.vx = -effectiveSpeed;
           this.facing = -1;
         } else if (keys.right && !keys.left) {
-          this.vx = c.speed;
+          this.vx = effectiveSpeed;
           this.facing = 1;
         } else {
           this.vx *= 0.82;
@@ -2311,6 +2314,13 @@
       arrowSpeed: 10, retreatRange: 180, minimumRange: 220, preferredRange: 260
     };
 
+    const SHAMAN_CONFIG = {
+      name: 'Shaman', maxHp: 20, baseSpeed: 1.65, jumpForce: -13.5,
+      dmg: 2, color: '#d8b4fe', scale: 0.95, movementType: 'ground',
+      visionRange: 560, hearingRange: 280, attackRange: 35,
+      predictionAccuracy: 0.4, supportRange: 290
+    };
+
     const SHIELDBEARER_CONFIG = {
       name: 'Shieldbearer', maxHp: 35, baseSpeed: 1.5, jumpForce: -13.5,
       dmg: 7, color: '#60a5a0', scale: 1.0, movementType: 'ground',
@@ -2343,7 +2353,19 @@
         this.lastPlayerCrossTime = 0;
 
         this.devourable = ['scout', 'warrior', 'brute'].includes(type);
-        if (type === 'shieldbearer') {
+        this.buffActive = false;
+        this.buffTimer = 0;
+        this.mutationNoticeTimer = 0;
+        this.lastAbsorbedType = null;
+        if (type === 'shaman') {
+          Object.assign(this, SHAMAN_CONFIG);
+          this.spellPhase = 'READY';
+          this.spellType = null;
+          this.spellTarget = null;
+          this.spellTimer = 0;
+          this.channelProgress = 0;
+          this.spellCooldowns = { HEAL: 0, BUFF: 0, CURSE: 0 };
+        } else if (type === 'shieldbearer') {
           Object.assign(this, SHIELDBEARER_CONFIG);
           this.guardFacing = this.facing;
           this.guardTurnTarget = this.guardFacing;
@@ -2461,6 +2483,7 @@
             this.blockFlash = 120;
           }
         }
+        if (this.type === 'shaman' && this.spellPhase === 'CASTING' && amount > 0) this.cancelShamanSpell(true);
         this.hp -= amount;
         this.hitFlash = 6;
         this.lastDamageTime = simulationTime;
@@ -2500,6 +2523,13 @@
 
         if (this.hp <= 0) {
           this.dead = true;
+          this.buffActive = false;
+          this.buffTimer = 0;
+          if (this.type === 'shaman') {
+            this.cancelShamanSpell();
+            this.spellPhase = 'READY';
+            this.spellTimer = 0;
+          }
           PlayerBehaviorMemory.notifyKill();
           document.getElementById('killCounter').textContent = `Bajas: ${RunStats.totalKills}`;
           goblinCorpses.push(new GoblinCorpse(this.x, this.y, this.type, this.scale, this.devourable));
@@ -2563,6 +2593,12 @@
           return;
         }
 
+        if (this.type === 'shaman') {
+          this.currentState = this.spellPhase === 'CASTING' ? 'SHAMAN_CAST' :
+            (this.hasVisualContact || this.alertLevel > 50 ? 'SHAMAN_REPOSITION' : 'PATROL');
+          this.currentTargetName = this.spellTarget === player ? 'Jugador' : (this.spellTarget?.name || 'Reposición');
+          return;
+        }
         if (this.type === 'archer') {
           this.evaluateArcherAI();
           return;
@@ -2740,7 +2776,7 @@
           this.combatTimer -= dt;
           const forward = (player.x - this.x) * this.lockedFacing;
           if (!this.hasHitThisAttack && forward >= 0 && forward <= this.attackRange * 1.25 && Math.abs(player.y - this.y) < 35) {
-            const accepted = player.takeDamage(this.dmg, 'SHIELDBEARER');
+            const accepted = player.takeDamage(this.effectiveDamage(), 'SHIELDBEARER');
             this.hasHitThisAttack = true;
             if (accepted) {
               player.vx = this.lockedFacing * (this.consumedTraits.brute > 0 ? 13 + this.consumedTraits.brute * 2 : this.bashKnockback);
@@ -2827,7 +2863,7 @@
             this.attackDirectionLocked = false;
             this.currentState = 'ARCHER_REPOSITION';
           } else if (this.shotTimer <= 0) {
-            if (hasLine) enemyProjectiles.push(new EnemyArrow(this.x, this.y - 36 * this.scale, this.shotAngle, this.arrowSpeed, this.dmg));
+            if (hasLine) enemyProjectiles.push(new EnemyArrow(this.x, this.y - 36 * this.scale, this.shotAngle, this.arrowSpeed, this.effectiveDamage()));
             this.shotPhase = 'RELEASE'; this.combatPhase = 'ACTIVE';
             this.currentState = 'ARCHER_SHOOT'; this.shotTimer = 100;
           }
@@ -2844,7 +2880,86 @@
         }
       }
 
+      // Multiplicadores temporales: no sobrescriben stats ni traits heredados.
+      effectiveDamage() { return this.dmg * (this.buffActive ? 1.15 : 1); }
+      applySupportBuff() { this.buffActive = true; this.buffTimer = 5000; }
+
+      cancelShamanSpell(interrupted = false) {
+        if (interrupted && this.spellPhase === 'CASTING') {
+          damageNumbers.push(new DamageNumber(this.x, this.y - 65, '¡INTERRUMPIDO!', '#fbbf24'));
+        }
+        this.spellPhase = 'RECOVERY';
+        this.spellTimer = 900;
+        this.spellType = null;
+        this.spellTarget = null;
+        this.channelProgress = 0;
+      }
+
+      updateShamanCombat(dt) {
+        for (const key of Object.keys(this.spellCooldowns)) this.spellCooldowns[key] = Math.max(0, this.spellCooldowns[key] - dt);
+        if (this.dead || gameState !== 'PLAYING' || this.isStunned > 0 || this.isDevouring || this.isTransforming || this.currentState === 'DEVOUR') {
+          this.cancelShamanSpell();
+          return;
+        }
+        if (this.spellPhase === 'RECOVERY') {
+          this.spellTimer = Math.max(0, this.spellTimer - dt);
+          if (!this.spellTimer) this.spellPhase = 'READY';
+          return;
+        }
+        if (this.spellPhase === 'CASTING') {
+          const target = this.spellTarget;
+          if (!target || target.dead || target.hp <= 0 ||
+              Math.hypot(target.x - this.x, target.y - this.y) > this.supportRange ||
+              (target === player && (!this.hasVisualContact || player.shamanSlowTimer > 0))) {
+            this.cancelShamanSpell();
+            return;
+          }
+          this.spellTimer = Math.max(0, this.spellTimer - dt);
+          this.channelProgress = 1 - this.spellTimer / (this.spellType === 'CURSE' ? 1200 : 1000);
+          if (this.spellTimer > 0) return;
+          if (this.spellType === 'HEAL') {
+            const healed = Math.min(14, target.maxHp - target.hp);
+            target.hp += healed;
+            if (healed > 0) damageNumbers.push(new DamageNumber(target.x, target.y - 60, '+' + healed, '#4ade80'));
+          } else if (this.spellType === 'BUFF') target.applySupportBuff();
+          else player.shamanSlowTimer = 2500;
+          this.cancelShamanSpell();
+          this.spellTimer = 1400;
+          return;
+        }
+        const away = Math.sign(this.x - player.x) || this.facing;
+        const escapeX = this.x + away * 40;
+        if (Math.hypot(player.x-this.x, player.y-this.y) < 170 && escapeX > 25 && escapeX < width-25 &&
+            !obstacles.some(o => !o.broken && this.y > o.y && escapeX >= o.x-8 && escapeX <= o.x+o.w+8)) {
+          this.currentState = 'SHAMAN_REPOSITION';
+          return;
+        }
+        const allies = duendes.filter(d => d !== this && !d.dead && d.hp > 0 && Math.hypot(d.x - this.x, d.y - this.y) <= this.supportRange);
+        let target = null, spell = null;
+        if (!this.spellCooldowns.HEAL) {
+          target = allies.filter(d => d.hp / d.maxHp < 0.75).sort((a,b) => a.hp/a.maxHp - b.hp/b.maxHp)[0];
+          if (target) spell = 'HEAL';
+        }
+        if (!spell && !this.spellCooldowns.BUFF) {
+          target = allies.filter(d => !d.buffActive).sort((a,b) => b.dmg - a.dmg)[0];
+          if (target) spell = 'BUFF';
+        }
+        if (!spell && !this.spellCooldowns.CURSE && this.hasVisualContact && !player.shamanSlowTimer && Math.hypot(player.x-this.x, player.y-this.y) <= this.supportRange) {
+          spell = 'CURSE'; target = player;
+        }
+        if (!spell) return;
+        this.spellType = spell;
+        this.spellTarget = target;
+        this.spellPhase = 'CASTING';
+        this.currentState = 'SHAMAN_CAST';
+        this.currentTargetName = target === player ? 'Jugador' : target.name;
+        this.spellTimer = spell === 'CURSE' ? 1200 : 1000;
+        this.channelProgress = 0;
+        this.spellCooldowns[spell] = spell === 'HEAL' ? 6500 : 7500;
+      }
+
       updateCombat(dt) {
+        if (this.type === 'shaman') { this.updateShamanCombat(dt); return; }
         if (this.isStunned > 0 || this.isTransforming || gameState === 'GAME_OVER' || gameState === 'VICTORY') return;
         if (this.type === 'archer') { this.updateArcherCombat(dt); return; }
         if (this.type === 'shieldbearer') { this.updateShieldCombat(dt); return; }
@@ -2923,7 +3038,7 @@
             const inRangeY = Math.abs(player.y - this.y) < 35;
 
             if (inRangeX && inRangeY) {
-              const accepted = player.takeDamage(this.dmg, this.type.toUpperCase());
+              const accepted = player.takeDamage(this.effectiveDamage(), this.type.toUpperCase());
               this.hasHitThisAttack = true;
               if (accepted && (this.type === 'brute' || this.consumedTraits.brute > 0)) {
                 player.vx = this.lockedFacing * (13 + this.consumedTraits.brute * 2);
@@ -2975,6 +3090,19 @@
           }
 
           switch (this.currentState) {
+            case 'SHAMAN_CAST':
+              moveDir = 0;
+              break;
+            case 'SHAMAN_REPOSITION': {
+              const side = Math.sign(this.x - player.x) || this.facing;
+              const ally = duendes.find(d => d !== this && !d.dead && (d.x-player.x)*side > 0 && Math.abs(d.x-player.x) < 260);
+              const desiredX = player.x + side * (ally ? Math.min(300, Math.max(200, Math.abs(ally.x-player.x)+65)) : 240);
+              moveDir = Math.abs(desiredX-this.x) > 25 ? Math.sign(desiredX-this.x) : 0;
+              // Sin salida junto a borde/pilar: se queda vulnerable, no huye indefinidamente.
+              if (this.x + moveDir*35 < 25 || this.x + moveDir*35 > width-25 ||
+                  obstacles.some(o => !o.broken && this.y > o.y && this.x+moveDir*35 >= o.x-8 && this.x+moveDir*35 <= o.x+o.w+8)) moveDir = 0;
+              break;
+            }
             case 'GUARD':
               if (distToPlayer > this.attackRange * 0.85 && this.combatPhase !== 'WINDUP' && this.combatPhase !== 'ACTIVE') moveDir = Math.sign(player.x - this.x);
               break;
@@ -3016,6 +3144,8 @@
                     this.isMutated = true;
                     const cType = this.targetCorpse.type;
                     this.consumedTraits[cType]++;
+                    this.lastAbsorbedType = cType;
+                    this.mutationNoticeTimer = 1500;
                     this.targetCorpse.dead = true;
                     this.targetCorpse = null;
 
@@ -3049,7 +3179,7 @@
                     hitStopTimer = 65;
 
                     AdaptiveDirector.notifyMutationSuccess();
-                    damageNumbers.push(new DamageNumber(this.x, this.y - 50, '¡MUTACIÓN!', '#c084fc'));
+                    // Aviso anclado de 1.5 s con el tipo absorbido, dibujado junto al enemigo.
                   }
                 }
               } else {
@@ -3148,7 +3278,7 @@
 
           if (this.jumpCooldown > 0) this.jumpCooldown -= dt;
 
-          if (this.isGrounded && this.jumpCooldown <= 0 && this.currentState !== 'BRACE') {
+          if (this.isGrounded && this.jumpCooldown <= 0 && this.currentState !== 'BRACE' && !(this.type === 'shaman' && this.spellPhase === 'CASTING')) {
             const targetY = (this.currentState === 'DEVOUR' && this.targetCorpse) ? this.targetCorpse.y : player.y;
             const targetX = (this.currentState === 'DEVOUR' && this.targetCorpse) ? this.targetCorpse.x : player.x;
             const vertDiff = this.y - targetY;
@@ -3170,7 +3300,7 @@
 
           if (this.dropTimer > 0) this.dropTimer--;
           const targetY = (this.currentState === 'DEVOUR' && this.targetCorpse) ? this.targetCorpse.y : player.y;
-          if (this.isGrounded && this.currentSurfaceY < groundY && targetY > this.y + 40) {
+          if (this.isGrounded && this.currentSurfaceY < groundY && targetY > this.y + 40 && !(this.type === 'shaman' && this.spellPhase === 'CASTING')) {
             this.dropTimer = 16;
           }
 
@@ -3178,7 +3308,11 @@
             moveDir = 0;
             separationForce = 0;
           }
-          this.vx += (moveDir * this.speed * 0.22) + (separationForce * 0.15);
+          if (this.type === 'shaman' && this.spellPhase === 'CASTING') {
+            moveDir = 0;
+            separationForce = 0;
+          }
+          this.vx += (moveDir * this.speed * (this.buffActive ? 1.2 : 1) * 0.22) + (separationForce * 0.15);
           this.vx *= 0.82;
 
           if (!this.attackDirectionLocked) {
@@ -3263,6 +3397,9 @@
 
       update(dt) {
         if (this.dead || isRunFinished()) return;
+        this.buffTimer = Math.max(0, this.buffTimer - dt);
+        this.buffActive = this.buffTimer > 0;
+        this.mutationNoticeTimer = Math.max(0, this.mutationNoticeTimer - dt);
         if (this.hitFlash > 0) this.hitFlash--;
         if (this.yellowFlash > 0) this.yellowFlash--;
 
@@ -3289,9 +3426,38 @@
         this.updateMovement(dt);
       }
 
+      drawSupportEffects(c) {
+        c.save(); // Scope local de soporte; no altera el brillo de mutaciones.
+        if (this.buffActive) {
+          c.strokeStyle = '#fbbf24'; c.lineWidth = 2;
+          c.beginPath(); c.ellipse(this.x, this.y - 25, 25*this.scale, 38*this.scale, 0, 0, Math.PI*2); c.stroke();
+        }
+        if (this.mutationNoticeTimer > 0) {
+          c.fillStyle = '#e9d5ff'; c.font = 'bold 12px monospace'; c.textAlign = 'center';
+          c.fillText('¡MUTACIÓN!', this.x, this.y - 95*this.scale);
+          c.fillText('ABSORBIÓ: ' + this.lastAbsorbedType.toUpperCase(), this.x, this.y - 81*this.scale);
+        }
+        if (this.type === 'shaman') {
+          c.strokeStyle = '#d8b4fe'; c.lineWidth = 3;
+          c.beginPath(); c.moveTo(this.x+18*this.facing, this.y); c.lineTo(this.x+18*this.facing, this.y-65*this.scale); c.stroke();
+          c.fillStyle = '#c084fc'; c.beginPath(); c.arc(this.x+18*this.facing,this.y-65*this.scale,6,0,Math.PI*2); c.fill();
+          if (this.spellPhase === 'CASTING' && this.spellTarget && !this.dead) {
+            const target = this.spellTarget; // Referencia viva: resize no deja coordenadas antiguas.
+            c.strokeStyle = this.spellType === 'HEAL' ? '#4ade80' : this.spellType === 'BUFF' ? '#fbbf24' : '#c084fc';
+            c.lineWidth = 2 + this.channelProgress*3;
+            c.beginPath(); c.moveTo(this.x+18*this.facing,this.y-65*this.scale); c.lineTo(target.x,target.y-30); c.stroke();
+            c.beginPath(); c.arc(target.x,target.y-30,25,0,Math.PI*2); c.stroke();
+            c.fillStyle = c.strokeStyle; c.font = 'bold 12px monospace'; c.textAlign = 'center';
+            c.fillText(this.spellType + ' ' + Math.round(this.channelProgress*100)+'%', this.x,this.y-80*this.scale);
+          }
+        }
+        c.restore();
+      }
+
       draw(c) {
         c.save(); // Scope general del duende; se restaura al final de draw().
 
+        this.drawSupportEffects(c);
         if (this.consumedTraits.scout > 0) {
           for (const g of this.ghostTrails) {
             c.save();
@@ -3499,12 +3665,14 @@
         if (debugMode) {
           const debugBoxW = 125;
           let debugBoxH = this.isMutated ? 58 : 48;
+          if (this.type === 'shaman') debugBoxH += 33;
+          if (this.buffActive) debugBoxH += 11;
           if (this.type === 'archer') debugBoxH += 22;
           if (this.type === 'shieldbearer') debugBoxH += 44;
           if (this.isStunned > 0 || this.isTransforming) debugBoxH += 11;
 
           const dbgX = posX - debugBoxW / 2;
-          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : 0);
+          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : this.type === 'shaman' ? 33 : 0) - (this.buffActive ? 11 : 0);
 
           c.fillStyle = 'rgba(15, 23, 42, 0.9)';
           c.strokeStyle = '#38bdf8';
@@ -3545,6 +3713,17 @@
             c.fillText(`MUTATED: B:${this.consumedTraits.brute} W:${this.consumedTraits.warrior} S:${this.consumedTraits.scout}`, dbgX + 5, currentLineY);
             currentLineY += 10;
           }
+          if (this.buffActive) {
+            c.fillStyle = '#fbbf24';
+            c.fillText('BUFF: ' + (this.buffTimer/1000).toFixed(1)+'s', dbgX+5,currentLineY);
+            currentLineY += 11;
+          }
+          if (this.type === 'shaman') {
+            c.fillStyle = '#d8b4fe';
+            c.fillText('SPELL: ' + (this.spellType || 'NONE'),dbgX+5,currentLineY);
+            c.fillText('CHANNEL: ' + Math.round(this.channelProgress*100)+'%',dbgX+5,currentLineY+11);
+            c.fillText('RECOVERY: ' + (this.spellPhase === 'RECOVERY' ? (this.spellTimer/1000).toFixed(1) : '0')+'s',dbgX+5,currentLineY+22);
+          }
           if (this.type === 'archer') {
             c.fillStyle = '#fde68a';
             c.fillText(`DIST: ${Math.round(Math.hypot(player.x - this.x, player.y - this.y))}`, dbgX + 5, currentLineY);
@@ -3582,9 +3761,25 @@
       coyoteTimer = 0;
     }
 
+    function clearSupportEffects() {
+      player.shamanSlowTimer = 0;
+      for (const enemy of duendes) {
+        enemy.buffActive = false;
+        enemy.buffTimer = 0;
+        enemy.mutationNoticeTimer = 0;
+        if (enemy.type === 'shaman') {
+          enemy.cancelShamanSpell();
+          enemy.spellPhase = 'READY';
+          enemy.spellTimer = 0;
+          enemy.spellCooldowns = { HEAL: 0, BUFF: 0, CURSE: 0 };
+        }
+      }
+    }
+
     function finishRun(isVictory) {
       if (isRunFinished()) return;
       gameState = isVictory ? 'VICTORY' : 'GAME_OVER';
+      clearSupportEffects();
       RunStats.endTime = simulationTime;
       scheduledActions.length = 0;
       projectiles.length = 0;
@@ -3595,6 +3790,7 @@
     }
 
     function clearRoundCombat() {
+      clearSupportEffects();
       projectiles.length = 0;
       enemyProjectiles.length = 0;
       scheduledActions.length = 0;
@@ -3935,6 +4131,14 @@
 
       player.update();
       player.draw(ctx);
+      if (player.shamanSlowTimer > 0) {
+        ctx.save();
+        ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(player.x, player.y-25, 22, 36, 0, 0, Math.PI*2); ctx.stroke();
+        ctx.fillStyle = '#d8b4fe'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('MALDICIÓN', player.x, player.y-70);
+        ctx.restore();
+      }
 
       for (let i = damageNumbers.length - 1; i >= 0; i--) {
         if (!isRunFinished()) damageNumbers[i].update();
@@ -4006,7 +4210,7 @@
         const boxX = width - 240;
         const boxY = 16;
         const boxW = 224;
-        const boxH = 350;
+        const boxH = 364;
         ctx.fillRect(boxX, boxY, boxW, boxH);
         ctx.strokeRect(boxX, boxY, boxW, boxH);
 
@@ -4054,6 +4258,7 @@
           `Invuln: ${player.invuln}`, `Last Hit: ${player.lastDamageSource}`,
           `Recovery: ${player.lastPhysicsRecoveryReason}`
         ];
+        if (player.shamanSlowTimer > 0) playerLines.push(`CURSE: ${(player.shamanSlowTimer/1000).toFixed(1)}s`);
         playerLines.forEach((line, index) => ctx.fillText(line, boxX + 10, boxY + 214 + index * 14));
       }
 
