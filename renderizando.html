@@ -417,10 +417,10 @@
       { round: 1, baseEnemies: ['scout', 'scout', 'warrior', 'warrior'] },
       { round: 2, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'archer'] },
       { round: 3, baseEnemies: ['scout', 'warrior', 'brute', 'archer', 'shieldbearer'] },
-      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman'] },
-      { round: 5, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman'] },
+      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] },
+      { round: 5, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] },
       // TODO: REEMPLAZAR RONDA 6 POR BOSS REY DUENDE
-      { round: 6, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'archer', 'shieldbearer', 'shaman'] }
+      { round: 6, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer', 'shaman', 'winged'] }
     ];
 
     // --- MEMORIA COLECTIVA DE COMBATE ---
@@ -819,9 +819,15 @@
         this.reserved = false;
         this.reservedBy = null;
         this.dead = false;
+        this.fallVelocity = 0;
       }
 
       update(dt) {
+        // Caída sencilla solo del cadáver alado; no interviene en DEVOUR.
+        if (this.type === 'winged' && this.y < groundY) {
+          this.fallVelocity = Math.min(10, this.fallVelocity + 0.35 * (dt / FIXED_STEP_MS));
+          this.y = Math.min(groundY, this.y + this.fallVelocity * (dt / FIXED_STEP_MS));
+        }
         this.totalLife += dt;
 
         if (this.reserved && this.reservedBy && !this.reservedBy.dead && (this.reservedBy.currentState === 'DEVOUR' || this.reservedBy.isTransforming)) {
@@ -1283,6 +1289,18 @@
         if (Number.isFinite(enemy.lastSeenPlayerY)) enemy.lastSeenPlayerY += deltaY;
         if (Number.isFinite(enemy.lastRelPlayerX)) enemy.lastRelPlayerX = player.x - enemy.x;
         for (const trail of enemy.ghostTrails) remapPoint(trail);
+        if (enemy.movementType === 'flying') {
+          if (Number.isFinite(enemy.lockedDiveX)) enemy.lockedDiveX = clampX(enemy.lockedDiveX * ratioX, 10);
+          if (Number.isFinite(enemy.lockedDiveY)) enemy.lockedDiveY += deltaY;
+          // Remapear la dirección ya bloqueada, sin volver a apuntar al jugador.
+          if (enemy.currentState === 'DIVE') {
+            const speed = Math.hypot(enemy.vx, enemy.vy);
+            const remappedLength = Math.hypot(enemy.vx * ratioX, enemy.vy);
+            if (remappedLength > 0) { enemy.vx *= ratioX * speed / remappedLength; enemy.vy *= speed / remappedLength; }
+          }
+          for (const trail of enemy.flightTrails) remapPoint(trail);
+          enemy.validateFlyingPhysics();
+        }
       }
       for (const entity of [...projectiles, ...enemyProjectiles, ...activeVisuals, ...damageNumbers]) remapPoint(entity);
       if (Number.isFinite(PlayerBehaviorMemory.lastRecordedX)) PlayerBehaviorMemory.lastRecordedX *= ratioX;
@@ -2314,6 +2332,14 @@
       arrowSpeed: 10, retreatRange: 180, minimumRange: 220, preferredRange: 260
     };
 
+    const WINGED_CONFIG = {
+      name: 'Winged', maxHp: 18, baseSpeed: 2.3, jumpForce: -13.5,
+      dmg: 10, color: '#7dd3fc', scale: 0.9, movementType: 'flying',
+      visionRange: 620, hearingRange: 280, attackRange: 42,
+      predictionAccuracy: 0.35, diveSpeed: 9, divePrepDuration: 700,
+      diveLockWindow: 220, diveRecoveryDuration: 1500, crashDuration: 820
+    };
+
     const SHAMAN_CONFIG = {
       name: 'Shaman', maxHp: 20, baseSpeed: 1.65, jumpForce: -13.5,
       dmg: 2, color: '#d8b4fe', scale: 0.95, movementType: 'ground',
@@ -2357,7 +2383,19 @@
         this.buffTimer = 0;
         this.mutationNoticeTimer = 0;
         this.lastAbsorbedType = null;
-        if (type === 'shaman') {
+        if (type === 'winged') {
+          Object.assign(this, WINGED_CONFIG);
+          this.y = Math.max(Math.min(70, groundY), groundY - 140);
+          this.prevY = this.y;
+          this.isGrounded = false;
+          this.diveTimer = 0;
+          this.diveCooldown = 1200;
+          this.diveLocked = false;
+          this.lockedDiveX = null;
+          this.lockedDiveY = null;
+          this.diveHasHit = false;
+          this.flightTrails = [];
+        } else if (type === 'shaman') {
           Object.assign(this, SHAMAN_CONFIG);
           this.spellPhase = 'READY';
           this.spellType = null;
@@ -2433,7 +2471,7 @@
         this.lastDamageAmount = 0;
         this.hasVisualContact = false;
 
-        this.currentState = 'PATROL';
+        this.currentState = type === 'winged' ? 'FLY_HOVER' : 'PATROL';
         this.currentTargetName = 'Ninguno';
         this.decisionTimer = 0;
         this.decisionInterval = 180 + Math.random() * 180;
@@ -2525,6 +2563,10 @@
           this.dead = true;
           this.buffActive = false;
           this.buffTimer = 0;
+          if (this.movementType === 'flying') {
+            this.cancelDive();
+            this.flightTrails.length = 0;
+          }
           if (this.type === 'shaman') {
             this.cancelShamanSpell();
             this.spellPhase = 'READY';
@@ -2593,6 +2635,10 @@
           return;
         }
 
+        if (this.movementType === 'flying') {
+          this.currentTargetName = this.currentState === 'DIVE' || this.currentState === 'DIVE_PREP' ? 'Picada' : 'Posición aérea';
+          return;
+        }
         if (this.type === 'shaman') {
           this.currentState = this.spellPhase === 'CASTING' ? 'SHAMAN_CAST' :
             (this.hasVisualContact || this.alertLevel > 50 ? 'SHAMAN_REPOSITION' : 'PATROL');
@@ -2880,6 +2926,211 @@
         }
       }
 
+      // Base aérea reutilizable: y sigue representando los pies del stickman.
+      validateFlyingPhysics() {
+        const margin = Math.min(25, width / 2);
+        const bottom = Math.max(0, groundY), top = Math.min(70 * this.scale, bottom);
+        if (![this.x, this.y, this.vx, this.vy].every(Number.isFinite)) {
+          console.warn('[FlyingPhysicsRecovery]', { type: this.type, x: this.x, y: this.y, vx: this.vx, vy: this.vy });
+          this.x = Number.isFinite(this.x) ? this.x : width / 2;
+          this.y = Number.isFinite(this.y) ? this.y : Math.max(top, bottom - 140);
+          this.vx = this.vy = 0;
+          this.cancelDive();
+        }
+        this.x = Math.max(margin, Math.min(width-margin, this.x));
+        this.y = Math.max(top, Math.min(bottom, this.y));
+        // Un resize puede desplazar una plataforma dentro del cuerpo aéreo.
+        // Resolver solo ese solapamiento por el borde libre más cercano.
+        const radius = 8*this.scale;
+        const solids = [...obstacles.filter(o => !o.broken), ...platforms];
+        const inside = (x,y,b) => x>b.x-radius && x<b.x+b.w+radius && y>b.y && y<b.y+b.h+48*this.scale;
+        for (const box of solids) {
+          if (!inside(this.x,this.y,box)) continue;
+          const choices = [
+            {x:box.x-radius-1,y:this.y}, {x:box.x+box.w+radius+1,y:this.y},
+            {x:this.x,y:box.y-1}, {x:this.x,y:box.y+box.h+48*this.scale+1}
+          ].filter(p=>p.x>=margin && p.x<=width-margin && p.y>=top && p.y<=bottom && !solids.some(b=>inside(p.x,p.y,b)));
+          choices.sort((a,b)=>Math.hypot(a.x-this.x,a.y-this.y)-Math.hypot(b.x-this.x,b.y-this.y));
+          if (choices.length) { this.x=choices[0].x; this.y=choices[0].y; }
+        }
+        this.prevY = this.y;
+      }
+
+      cancelDive() {
+        this.diveLocked = false;
+        this.lockedDiveX = this.lockedDiveY = null;
+        this.diveHasHit = false;
+        this.diveTimer = 0;
+        this.diveCooldown = this.diveRecoveryDuration;
+        if (this.currentState !== 'DEVOUR' && !this.isTransforming) this.currentState = 'FLY_REPOSITION';
+      }
+
+      flightWorldHit(x1, y1) {
+        let first = null;
+        const radius = 8 * this.scale;
+        // Minkowski: ampliar la geometría por el cuerpo, barrer sus pies.
+        for (const box of [...obstacles.filter(o => !o.broken), ...platforms,
+          { x: -100, y: groundY, w: width+200, h: height+200 }]) {
+          const t = segmentBoxHit(this.x, this.y, x1, y1,
+            { x: box.x-radius, y: box.y, w: box.w+radius*2, h: box.h+48*this.scale });
+          // Una superficie en contacto no impide despegar hacia fuera.
+          if (t !== null && !(t === 0 && y1 < this.y && this.y <= box.y + 0.01) && (!first || t < first.t)) first = { t, box };
+        }
+        return first;
+      }
+
+      moveFlyingToward(tx, ty) {
+        this.validateFlyingPhysics();
+        const top = Math.min(70*this.scale, Math.max(0, groundY));
+        tx = Math.max(Math.min(25,width/2), Math.min(width-Math.min(25,width/2), tx));
+        ty = Math.max(top, Math.min(groundY, ty));
+        // Desvíos locales por el borde de plataformas y por encima de pilares.
+        for (const box of [...obstacles.filter(o => !o.broken), ...platforms]) {
+          const radius = 8*this.scale;
+          const hit = segmentBoxHit(this.x,this.y,tx,ty,{x:box.x-radius,y:box.y,w:box.w+2*radius,h:box.h+48*this.scale});
+          if (hit === null || (this.y <= box.y && ty <= box.y)) continue;
+          if (obstacles.includes(box)) {
+            ty = Math.max(top, box.y-12);
+            tx = this.x;
+          } else {
+            const edge = Math.abs(this.x-box.x) < Math.abs(this.x-(box.x+box.w)) ? box.x-radius-12 : box.x+box.w+radius+12;
+            tx = edge;
+            if (Math.abs(this.x-edge) > 4) ty = this.y;
+          }
+          break;
+        }
+        const dx = tx-this.x, dy = ty-this.y, dist = Math.hypot(dx,dy);
+        const speed = this.speed * (this.buffActive ? 1.2 : 1);
+        const desiredSpeed = Math.min(speed, dist * 0.12);
+        this.vx += ((dist > 0 ? dx/dist*desiredSpeed : 0)-this.vx)*0.16;
+        this.vy += ((dist > 0 ? dy/dist*desiredSpeed : 0)-this.vy)*0.16;
+        const hit = this.flightWorldHit(this.x+this.vx, this.y+this.vy);
+        const fraction = hit ? Math.max(0,hit.t-0.01) : 1;
+        this.x += this.vx*fraction; this.y += this.vy*fraction;
+        if (hit) this.vx = this.vy = 0;
+        this.isGrounded = false;
+        if (Math.abs(this.vx)>0.1) this.facing = Math.sign(this.vx);
+        this.validateFlyingPhysics();
+      }
+
+      updateWingedCombat(dt) {
+        if (this.dead || gameState !== 'PLAYING') return;
+        if (this.currentState === 'DEVOUR' || this.isDevouring || this.isTransforming) {
+          this.cancelDive();
+          return;
+        }
+        this.diveCooldown = Math.max(0, this.diveCooldown-dt);
+        if (this.isStunned > 0) {
+          this.currentState = 'CRASH_STUN';
+          return;
+        }
+        if (this.currentState === 'CRASH_STUN') {
+          this.currentState = 'DIVE_RECOVER';
+          this.diveTimer = this.diveRecoveryDuration;
+          this.diveCooldown = this.diveRecoveryDuration;
+        }
+        if (this.currentState === 'DIVE_RECOVER') {
+          this.diveTimer = Math.max(0,this.diveTimer-dt);
+          if (!this.diveTimer) this.currentState = 'FLY_REPOSITION';
+          return;
+        }
+        if (this.currentState === 'DIVE_PREP') {
+          if (!this.diveLocked) {
+            this.lockedDiveX = Math.max(15,Math.min(width-15,player.x+player.vx*10*this.predictionAccuracy));
+            this.lockedDiveY = player.y-8;
+          }
+          this.diveTimer = Math.max(0,this.diveTimer-dt);
+          if (this.diveTimer <= this.diveLockWindow) this.diveLocked = true;
+          if (!this.diveTimer) {
+            const dx=this.lockedDiveX-this.x, dy=this.lockedDiveY-this.y, length=Math.hypot(dx,dy);
+            if (!(length > 0)) { this.cancelDive(); return; }
+            const speed=this.diveSpeed*(this.buffActive ? 1.2 : 1);
+            this.vx=dx/length*speed; this.vy=dy/length*speed;
+            this.currentState='DIVE'; this.diveTimer=1100; this.diveHasHit=false;
+          }
+          return;
+        }
+        if (this.currentState === 'DIVE') {
+          this.diveTimer -= dt;
+          if (this.diveTimer <= 0) {
+            this.currentState='DIVE_RECOVER'; this.diveTimer=this.diveRecoveryDuration;
+            this.diveCooldown=this.diveRecoveryDuration;
+          }
+          return;
+        }
+        const distance=Math.hypot(player.x-this.x,player.y-this.y);
+        if (this.hasVisualContact && !this.diveCooldown && player.y-this.y > 65 && distance > 90 && distance < 400) {
+          this.currentState='DIVE_PREP'; this.diveTimer=this.divePrepDuration;
+          this.diveLocked=false; this.lockedDiveX=player.x; this.lockedDiveY=player.y-8;
+          this.vx*=0.3; this.vy=-0.65;
+        } else this.currentState=distance<230 ? 'FLY_HOVER' : 'FLY_REPOSITION';
+      }
+
+      crashDive() {
+        this.currentState='CRASH_STUN';
+        this.isStunned=this.crashDuration;
+        this.diveCooldown=this.diveRecoveryDuration;
+        this.vx=this.vy=0;
+        this.diveHasHit=true;
+        audio.playHit();
+        for (let i=0;i<5;i++) activeVisuals.push(new StoneDebris(this.x,this.y-3));
+      }
+
+      updateFlyingMovement(dt) {
+        this.validateFlyingPhysics();
+        for (const trail of this.flightTrails) trail.alpha-=0.08;
+        this.flightTrails=this.flightTrails.filter(t=>t.alpha>0);
+        if (this.currentState==='DIVE') {
+          const nx=this.x+this.vx, ny=this.y+this.vy;
+          const world=this.flightWorldHit(nx,ny);
+          const radius=8*this.scale;
+          const playerHit=this.diveHasHit ? null : segmentBoxHit(this.x,this.y,nx,ny,
+            {x:player.x-12-radius,y:player.y-60,w:24+2*radius,h:60+48*this.scale});
+          if (playerHit!==null && (!world || playerHit<world.t)) {
+            this.x+=this.vx*playerHit; this.y+=this.vy*playerHit;
+            this.diveHasHit=true;
+            const direction=Math.sign(this.vx)||this.facing;
+            const accepted=player.takeDamage(this.effectiveDamage(),'WINGED');
+            if (isRunFinished()) return;
+            if (accepted) {
+              player.vx=direction*4; player.vy=-3;
+              player.isGrounded=false; coyoteTimer=0;
+              validatePlayerPhysics();
+            }
+            this.vx=-direction*2; this.vy=-2;
+            this.currentState='DIVE_RECOVER'; this.diveTimer=this.diveRecoveryDuration;
+            this.diveCooldown=this.diveRecoveryDuration;
+          } else if (world) {
+            const fraction=Math.max(0,world.t-0.01);
+            this.x+=this.vx*fraction; this.y+=this.vy*fraction;
+            this.crashDive();
+          } else {
+            this.flightTrails.push({x:this.x,y:this.y,alpha:0.6});
+            this.x=nx; this.y=ny;
+            if (this.x<25 || this.x>width-25 || this.y<Math.min(70*this.scale,groundY)) {
+              this.currentState='DIVE_RECOVER'; this.diveTimer=this.diveRecoveryDuration;
+              this.diveCooldown=this.diveRecoveryDuration;
+            }
+          }
+        } else if (this.currentState==='CRASH_STUN') {
+          this.vx=0; this.vy=Math.min(5,this.vy+0.3);
+          const hit=this.flightWorldHit(this.x,this.y+this.vy);
+          this.y+=this.vy*(hit ? Math.max(0,hit.t-0.01) : 1);
+          if (hit) this.vy=0;
+        } else if (this.currentState==='DIVE_PREP') {
+          this.vx*=0.8; this.vy=-0.65;
+          if (!this.flightWorldHit(this.x+this.vx,this.y+this.vy)) { this.x+=this.vx; this.y+=this.vy; }
+        } else {
+          const phase=simulationTime*0.002+this.flankSide;
+          const side=Math.sign(this.x-player.x)||this.flankSide;
+          this.moveFlyingToward(player.x+side*110+Math.sin(phase*0.7)*24,
+            Math.min(groundY-100,player.y-130)+Math.sin(phase)*16);
+        }
+        this.isGrounded=false;
+        if (this.consumedTraits.scout>0 && Math.abs(this.vx)>1.8) this.ghostTrails.push({x:this.x,y:this.y,facing:this.facing,alpha:0.45});
+        this.validateFlyingPhysics();
+      }
+
       // Multiplicadores temporales: no sobrescriben stats ni traits heredados.
       effectiveDamage() { return this.dmg * (this.buffActive ? 1.15 : 1); }
       applySupportBuff() { this.buffActive = true; this.buffTimer = 5000; }
@@ -2959,6 +3210,7 @@
       }
 
       updateCombat(dt) {
+        if (this.type === 'winged') { this.updateWingedCombat(dt); return; }
         if (this.type === 'shaman') { this.updateShamanCombat(dt); return; }
         if (this.isStunned > 0 || this.isTransforming || gameState === 'GAME_OVER' || gameState === 'VICTORY') return;
         if (this.type === 'archer') { this.updateArcherCombat(dt); return; }
@@ -3066,6 +3318,27 @@
       }
 
       updateMovement(dt) {
+        if (this.movementType === 'flying') {
+          if (this.currentState === 'DEVOUR' && this.targetCorpse && !this.targetCorpse.dead) {
+            // Llegar en X e Y ANTES de reutilizar el canal terrestre de 1200 ms.
+            if (Math.abs(this.x-this.targetCorpse.x) > 8 || Math.abs(this.y-this.targetCorpse.y) > 4) {
+              this.isDevouring = false;
+              this.devourTimer = 0;
+              this.moveFlyingToward(this.targetCorpse.x, this.targetCorpse.y);
+              return;
+            }
+            this.x = this.targetCorpse.x; this.y = this.targetCorpse.y;
+            this.prevY = this.y; this.vx = this.vy = 0;
+            this.isGrounded = true; this.currentSurfaceY = this.y;
+          } else if (!this.isTransforming) {
+            if (this.currentState === 'DEVOUR') {
+              // El case existente libera una reserva que dejó de ser válida.
+            } else {
+              this.updateFlyingMovement(dt);
+              return;
+            }
+          }
+        }
         const canControl = (this.isStunned <= 0 && !this.isTransforming && gameState !== 'GAME_OVER' && gameState !== 'VICTORY');
         let moveDir = 0;
         const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
@@ -3426,6 +3699,32 @@
         this.updateMovement(dt);
       }
 
+      drawWingedWings(c, x, y, scale) {
+        const state=this.currentState;
+        const folded=state==='DIVE' ? 0.18 : state==='DIVE_PREP' ? 0.48 : 1;
+        const flap=state==='DIVE' || state==='DIVE_PREP' ? 0 : Math.sin(simulationTime*0.016)*12;
+        const droop=state==='CRASH_STUN' ? 22 : -8+flap;
+        c.strokeStyle=this.hitFlash>0 ? '#fff' : this.color;
+        c.lineWidth=1.7*scale;
+        for (const side of [-1,1]) {
+          c.beginPath(); c.moveTo(x,y);
+          c.lineTo(x+side*28*scale*folded,y+(droop-15)*scale);
+          c.lineTo(x+side*39*scale*folded,y+(droop+6)*scale);
+          c.lineTo(x+side*20*scale*folded,y+(droop+1)*scale);
+          c.lineTo(x+side*10*scale*folded,y+14*scale);
+          c.lineTo(x,y); c.stroke();
+          c.beginPath(); c.moveTo(x,y);
+          c.lineTo(x+side*28*scale*folded,y+(droop-15)*scale); c.stroke();
+        }
+        if (state==='DIVE' || state==='DIVE_PREP') {
+          c.strokeStyle='rgba(186,230,253,0.45)'; c.lineWidth=1;
+          for (const side of [-1,1]) {
+            c.beginPath(); c.moveTo(x+side*12*scale,y+18*scale);
+            c.lineTo(x+side*15*scale,y+31*scale); c.stroke();
+          }
+        }
+      }
+
       drawSupportEffects(c) {
         c.save(); // Scope local de soporte; no altera el brillo de mutaciones.
         if (this.buffActive) {
@@ -3458,6 +3757,16 @@
         c.save(); // Scope general del duende; se restaura al final de draw().
 
         this.drawSupportEffects(c);
+        if (this.movementType === 'flying') {
+          c.save();
+          for (const trail of this.flightTrails) {
+            c.strokeStyle=`rgba(186,230,253,${trail.alpha*0.5})`;
+            c.lineWidth=1.5;
+            c.beginPath(); c.moveTo(trail.x,trail.y-24*this.scale);
+            c.lineTo(trail.x-this.vx*1.5,trail.y-24*this.scale-this.vy*1.5); c.stroke();
+          }
+          c.restore();
+        }
         if (this.consumedTraits.scout > 0) {
           for (const g of this.ghostTrails) {
             c.save();
@@ -3533,6 +3842,17 @@
           c.restore();
         }
 
+        // Pose aérea aislada: barras y F3 permanecen sin rotación.
+        const flyingPose = this.movementType === 'flying';
+        if (flyingPose) {
+          c.save();
+          let tilt=Math.max(-0.35,Math.min(0.35,this.vx*0.09));
+          if (this.currentState==='DIVE') tilt=Math.atan2(this.vy,this.vx)+Math.PI/2;
+          if (this.currentState==='DIVE_PREP') tilt=Math.atan2(this.lockedDiveY-this.y,this.lockedDiveX-this.x)+Math.PI/2;
+          const shake=this.currentState==='CRASH_STUN' ? Math.sin(simulationTime*0.06)*Math.min(2,this.isStunned/200) : 0;
+          c.translate(posX+shake,shoulderY); c.rotate(tilt); c.translate(-posX,-shoulderY);
+          this.drawWingedWings(c,posX,shoulderY,s);
+        }
         c.beginPath(); c.arc(posX, headY, 6 * s, 0, Math.PI * 2); c.stroke();
         c.beginPath();
         c.moveTo(posX - 4*s, headY); c.lineTo(posX - 12*s, headY - 8*s);
@@ -3645,6 +3965,7 @@
           c.restore();
         }
 
+        if (flyingPose) c.restore(); // Cierra únicamente la pose y las alas.
         if (this.isDevouring) {
           c.fillStyle = '#c084fc';
           c.font = 'bold 11px monospace';
@@ -3666,13 +3987,14 @@
           const debugBoxW = 125;
           let debugBoxH = this.isMutated ? 58 : 48;
           if (this.type === 'shaman') debugBoxH += 33;
+          if (this.type === 'winged') debugBoxH += 44;
           if (this.buffActive) debugBoxH += 11;
           if (this.type === 'archer') debugBoxH += 22;
           if (this.type === 'shieldbearer') debugBoxH += 44;
           if (this.isStunned > 0 || this.isTransforming) debugBoxH += 11;
 
           const dbgX = posX - debugBoxW / 2;
-          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : this.type === 'shaman' ? 33 : 0) - (this.buffActive ? 11 : 0);
+          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : this.type === 'shaman' ? 33 : this.type === 'winged' ? 44 : 0) - (this.buffActive ? 11 : 0);
 
           c.fillStyle = 'rgba(15, 23, 42, 0.9)';
           c.strokeStyle = '#38bdf8';
@@ -3717,6 +4039,15 @@
             c.fillStyle = '#fbbf24';
             c.fillText('BUFF: ' + (this.buffTimer/1000).toFixed(1)+'s', dbgX+5,currentLineY);
             currentLineY += 11;
+          }
+          if (this.type === 'winged') {
+            c.fillStyle='#bae6fd';
+            const phase=this.currentState==='DIVE_PREP' ? 'PREP' : this.currentState==='DIVE' ? 'ACTIVE' :
+              (this.currentState==='CRASH_STUN' || this.currentState==='DIVE_RECOVER' || this.diveCooldown>0 ? 'RECOVERY' : 'READY');
+            c.fillText('ALTITUDE: '+Math.round(groundY-this.y),dbgX+5,currentLineY);
+            c.fillText('DIVE: '+phase,dbgX+5,currentLineY+11);
+            c.fillText('XY: '+(this.lockedDiveX===null ? '--' : Math.round(this.lockedDiveX)+','+Math.round(this.lockedDiveY)),dbgX+5,currentLineY+22);
+            c.fillText('CD: '+(this.diveCooldown/1000).toFixed(1)+'s',dbgX+5,currentLineY+33);
           }
           if (this.type === 'shaman') {
             c.fillStyle = '#d8b4fe';
@@ -3767,6 +4098,11 @@
         enemy.buffActive = false;
         enemy.buffTimer = 0;
         enemy.mutationNoticeTimer = 0;
+        if (enemy.movementType === 'flying') {
+          enemy.cancelDive();
+          enemy.flightTrails.length = 0;
+          enemy.vx = enemy.vy = 0;
+        }
         if (enemy.type === 'shaman') {
           enemy.cancelShamanSpell();
           enemy.spellPhase = 'READY';
