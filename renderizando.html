@@ -416,11 +416,11 @@
     const ROUND_CONFIG = [
       { round: 1, baseEnemies: ['scout', 'scout', 'warrior', 'warrior'] },
       { round: 2, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'archer'] },
-      { round: 3, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer'] },
-      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'archer'] },
-      { round: 5, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'brute', 'archer'] },
+      { round: 3, baseEnemies: ['scout', 'warrior', 'brute', 'archer', 'shieldbearer'] },
+      { round: 4, baseEnemies: ['scout', 'scout', 'warrior', 'brute', 'archer', 'shieldbearer'] },
+      { round: 5, baseEnemies: ['scout', 'warrior', 'warrior', 'brute', 'archer', 'shieldbearer'] },
       // TODO: REEMPLAZAR RONDA 6 POR BOSS REY DUENDE
-      { round: 6, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'brute', 'archer', 'archer'] }
+      { round: 6, baseEnemies: ['scout', 'scout', 'warrior', 'warrior', 'brute', 'archer', 'archer', 'shieldbearer'] }
     ];
 
     // --- MEMORIA COLECTIVA DE COMBATE ---
@@ -1667,6 +1667,10 @@
       player.currentSurfaceY = player.y;
     }
 
+    function playerDamageSource(damageType = 'melee', x = player.x, y = player.y - 30) {
+      return { x, y, damageType, sourceType: currentClassKey.toUpperCase() };
+    }
+
     // --- ACCIÓN DE ATAQUE BÁSICO (CLIC IZQUIERDO) ---
     function executeBasicAttack(tx, ty) {
       if (gameState !== 'PLAYING') return;
@@ -1694,7 +1698,7 @@
           const dDist = Math.hypot(d.x - player.x, (d.y - 20) - (player.y - 30));
           const dAng = Math.atan2((d.y - 20) - (player.y - 30), d.x - player.x);
           if (dDist <= atk.range && Math.abs(angleDiff(angle, dAng)) < 0.7) {
-            d.takeDamage(atk.dmg);
+            d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * 3.5;
           }
         }
@@ -1703,7 +1707,7 @@
         activeVisuals.push(new ShieldShock(player.x + Math.cos(angle)*16, player.y - 30 + Math.sin(angle)*16, angle, atk.range, '#93c5fd', 2.2));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
-            d.takeDamage(atk.dmg);
+            d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * atk.knockback;
             d.vy = -2.5;
           }
@@ -1716,7 +1720,7 @@
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#fde047', 2.0));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
-            d.takeDamage(atk.dmg);
+            d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * atk.knockback;
             d.vy = -2.0;
           }
@@ -1726,7 +1730,7 @@
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#34d399', 1.8));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
-            d.takeDamage(atk.dmg);
+            d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * 2.0;
           }
         }
@@ -1735,7 +1739,7 @@
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, atk.range, '#c084fc', 2.2));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= atk.range) {
-            d.takeDamage(atk.dmg);
+            d.takeDamage(atk.dmg, playerDamageSource());
             d.vx = Math.cos(angle) * 3.0;
           }
         }
@@ -1749,6 +1753,15 @@
       const now = simulationTime;
       const cls = CLASSES[currentClassKey];
       const sk = cls.skills[selectedSkillIndex];
+      // Se evalúa al impactar: incluye el origen posterior a teleports y saltos.
+      const damageSource = () => {
+        const aoe = ['spin', 'leap_slam', 'ground_slam', 'shockwave_line', 'blink', 'meteor',
+          'holy_burst', 'divine_pillar', 'sanctuary', 'blade_flurry', 'bone_spikes', 'soul_harvest'].includes(sk.type);
+        if (sk.type === 'meteor') return playerDamageSource('aoe', tx, ty);
+        if (sk.type === 'divine_pillar') return playerDamageSource('aoe', tx, 0);
+        if (sk.type === 'shockwave_line' || sk.type === 'bone_spikes') return playerDamageSource('aoe', tx, groundY);
+        return playerDamageSource(aoe ? 'aoe' : 'melee');
+      };
 
       if (!sk.lastUsed) sk.lastUsed = 0;
       if (now - sk.lastUsed < sk.cooldown) return;
@@ -1777,7 +1790,7 @@
           const dDist = Math.hypot(d.x - player.x, (d.y - 20) - (player.y - 30));
           const dAng = Math.atan2((d.y - 20) - (player.y - 30), d.x - player.x);
           if (dDist <= sk.range && Math.abs(angleDiff(angle, dAng)) < sk.arc / 2) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vx = Math.cos(angle) * 6;
           }
         }
@@ -1787,7 +1800,7 @@
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.range, cls.color));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vx = (d.x > player.x ? 1 : -1) * 8;
           }
         }
@@ -1802,7 +1815,7 @@
           activeVisuals.push(new GroundCrack(player.x, player.y, sk.range, cls.color));
           for (const d of duendes) {
             if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
-              d.takeDamage(sk.dmg);
+              d.takeDamage(sk.dmg, damageSource());
               d.vy = -8;
             }
           }
@@ -1815,7 +1828,7 @@
         activeVisuals.push(new ShieldShock(player.x + Math.cos(angle)*25, player.y - 30 + Math.sin(angle)*25, angle, sk.range, cls.color, 5));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vx = Math.cos(angle) * sk.knockback;
             d.vy = -4;
           }
@@ -1827,7 +1840,7 @@
         activeVisuals.push(new GroundCrack(player.x, player.y, sk.range, cls.color));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vy = -10;
           }
         }
@@ -1838,7 +1851,7 @@
         activeVisuals.push(new DashGhost(player.x, player.y, cls.color));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= 80) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vx = player.vx * 1.3;
           }
         }
@@ -1849,7 +1862,7 @@
         activeVisuals.push(new GroundCrack(tx, groundY, sk.range, cls.color));
         for (const d of duendes) {
           if (Math.abs(d.x - tx) <= sk.range) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vy = -12;
           }
         }
@@ -1863,7 +1876,7 @@
         setPlayerTeleportPosition(tx, ty);
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.range, cls.color));
         for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'meteor') {
         audio.playSlam();
@@ -1871,7 +1884,7 @@
         screenShake = 20;
         activeVisuals.push(new MeteorImpact(tx, ty, sk.aoe, sk.color));
         for (const d of duendes) {
-          if (Math.hypot(d.x - tx, d.y - ty) <= sk.aoe) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - tx, d.y - ty) <= sk.aoe) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'holy_burst') {
         audio.playMagic();
@@ -1879,14 +1892,14 @@
         EncounterMemory.notifyAoE();
         activeVisuals.push(new RadialSpin(player.x, player.y - 30, sk.range, cls.color));
         for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'divine_pillar') {
         audio.playMagic();
         screenShake = 12;
         activeVisuals.push(new DivinePillar(tx, sk.width, cls.color));
         for (const d of duendes) {
-          if (Math.abs(d.x - tx) <= sk.width) d.takeDamage(sk.dmg);
+          if (Math.abs(d.x - tx) <= sk.width) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'sanctuary') {
         audio.playMagic();
@@ -1895,13 +1908,13 @@
         screenShake = 18;
         activeVisuals.push(new DivinePillar(player.x, sk.range, cls.color));
         for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'fast_stab') {
         audio.playSword();
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, sk.range, cls.color, 4));
         for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'multi_dagger') {
         audio.playSword();
@@ -1914,7 +1927,7 @@
         setPlayerTeleportPosition(tx + (tx > player.x ? -25 : 25), ty);
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, 65, cls.color, 4));
         for (const d of duendes) {
-          if (Math.hypot(d.x - tx, d.y - ty) <= 60) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - tx, d.y - ty) <= 60) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'blade_flurry') {
         audio.playSword();
@@ -1924,14 +1937,14 @@
           }, i * 60);
         }
         for (const d of duendes) {
-          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg);
+          if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) d.takeDamage(sk.dmg, damageSource());
         }
       } else if (sk.type === 'scythe_sweep') {
         audio.playSword();
         activeVisuals.push(new SlashArc(player.x, player.y - 30, angle, sk.range, cls.color, 4));
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.range) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             player.heal(sk.lifesteal);
           }
         }
@@ -1943,7 +1956,7 @@
         activeVisuals.push(new BoneSpikesVisual(tx, groundY, sk.range));
         for (const d of duendes) {
           if (Math.abs(d.x - tx) <= sk.range) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             d.vy = -9;
           }
         }
@@ -1955,7 +1968,7 @@
         let hits = 0;
         for (const d of duendes) {
           if (Math.hypot(d.x - player.x, d.y - player.y) <= sk.aoe) {
-            d.takeDamage(sk.dmg);
+            d.takeDamage(sk.dmg, damageSource());
             hits++;
           }
         }
@@ -2103,15 +2116,18 @@
         this.x = x; this.y = y;
         this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed;
         this.dmg = dmg; this.color = color; this.size = size; this.piercing = piercing;
+        this.sourceType = currentClassKey.toUpperCase();
+        this.damageType = 'projectile';
         this.dead = false;
       }
       update() {
+        const source = { x: this.x, y: this.y, damageType: this.damageType, sourceType: this.sourceType };
         this.x += this.vx; this.y += this.vy;
         if (this.x < 0 || this.x > width || this.y < 0 || this.y > groundY) this.dead = true;
 
         for (const d of duendes) {
           if (Math.hypot(d.x - this.x, (d.y - 20) - this.y) <= this.size + 14) {
-            d.takeDamage(this.dmg);
+            d.takeDamage(this.dmg, source);
             if (!this.piercing) { this.dead = true; break; }
           }
         }
@@ -2130,14 +2146,17 @@
         this.x = x; this.y = y; this.angle = angle;
         this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed;
         this.dmg = dmg; this.color = color; this.dead = false;
+        this.sourceType = currentClassKey.toUpperCase();
+        this.damageType = 'projectile';
       }
       update() {
+        const source = { x: this.x, y: this.y, damageType: this.damageType, sourceType: this.sourceType };
         this.x += this.vx; this.y += this.vy;
         if (this.x < 0 || this.x > width || this.y < 0 || this.y > groundY) this.dead = true;
 
         for (const d of duendes) {
           if (Math.hypot(d.x - this.x, (d.y - 20) - this.y) <= 25) {
-            d.takeDamage(this.dmg);
+            d.takeDamage(this.dmg, source);
             d.vx = this.vx * 0.4;
           }
         }
@@ -2292,6 +2311,15 @@
       arrowSpeed: 10, retreatRange: 180, minimumRange: 220, preferredRange: 260
     };
 
+    const SHIELDBEARER_CONFIG = {
+      name: 'Shieldbearer', maxHp: 35, baseSpeed: 1.5, jumpForce: -13.5,
+      dmg: 7, color: '#60a5a0', scale: 1.0, movementType: 'ground',
+      visionRange: 380, hearingRange: 280, attackRange: 46,
+      windupDuration: 360, recoveryDuration: 500, predictionAccuracy: 0.6,
+      guardTurnDelay: 220, frontalReduction: 0.7, aoeReduction: 0.25,
+      bashKnockback: 5
+    };
+
     // --- IA DE LOS DUENDES CON FÍSICA UNIFICADA Y HOTFIX DE STUN/KNOCKBACK ---
     class Duende {
       constructor(x, type) {
@@ -2315,7 +2343,14 @@
         this.lastPlayerCrossTime = 0;
 
         this.devourable = ['scout', 'warrior', 'brute'].includes(type);
-        if (type === 'archer') {
+        if (type === 'shieldbearer') {
+          Object.assign(this, SHIELDBEARER_CONFIG);
+          this.guardFacing = this.facing;
+          this.guardTurnTarget = this.guardFacing;
+          this.guardTurnTimer = 0;
+          this.blockFlash = 0;
+          this.lastBlockPercent = 0;
+        } else if (type === 'archer') {
           Object.assign(this, ARCHER_CONFIG);
           this.shotPhase = 'READY';
           this.shotTimer = 0;
@@ -2412,8 +2447,20 @@
         return verticalDifference <= maxJumpHeight + 8;
       }
 
-      takeDamage(amount) {
+      takeDamage(amount, source = null) {
         if (this.dead || isRunFinished()) return;
+        if (this.type === 'shieldbearer' && this.isShieldGuardActive() && source && Number.isFinite(source.x) && Number.isFinite(source.y)) {
+          const forward = (source.x - this.x) * this.guardFacing;
+          const vertical = source.y - (this.y - 30 * this.scale);
+          // Cono frontal ±45°. Fuentes >35 px por encima y espalda: daño completo.
+          if (forward > 0 && Math.abs(vertical) <= forward && vertical >= -35) {
+            const reduction = source.damageType === 'aoe' ? this.aoeReduction : this.frontalReduction;
+            amount = Math.round(amount * (1 - reduction) * 100) / 100;
+            this.lastBlockPercent = Math.round(reduction * 100);
+            if (this.blockFlash <= 0) damageNumbers.push(new DamageNumber(this.x, this.y - 65, `-${this.lastBlockPercent}%`, '#93c5fd'));
+            this.blockFlash = 120;
+          }
+        }
         this.hp -= amount;
         this.hitFlash = 6;
         this.lastDamageTime = simulationTime;
@@ -2518,6 +2565,16 @@
 
         if (this.type === 'archer') {
           this.evaluateArcherAI();
+          return;
+        }
+        if (this.type === 'shieldbearer') {
+          if (this.hasVisualContact || this.alertLevel > 50) {
+            this.currentState = Math.hypot(player.x - this.x, player.y - this.y) <= 200 ? 'GUARD' : 'CHASE';
+            this.currentTargetName = 'Jugador';
+          } else {
+            this.currentState = this.alertLevel > 20 && this.lastSeenPlayerX !== null ? 'INVESTIGATE' : 'PATROL';
+            this.currentTargetName = this.currentState === 'PATROL' ? 'Ruta' : 'Última posición';
+          }
           return;
         }
 
@@ -2639,6 +2696,73 @@
         }
       }
 
+      isShieldGuardActive() {
+        return !this.dead && this.isStunned <= 0 && !this.isDevouring && !this.isTransforming && this.currentState !== 'DEVOUR';
+      }
+
+      updateShieldGuard(dt) {
+        this.blockFlash = Math.max(0, this.blockFlash - dt);
+        if (!this.isShieldGuardActive() || this.combatPhase === 'WINDUP' || this.combatPhase === 'ACTIVE') {
+          this.guardTurnTimer = 0;
+          this.guardTurnTarget = this.guardFacing;
+          return;
+        }
+        const desired = (this.hasVisualContact || this.alertLevel > 50 ? Math.sign(player.x - this.x) : Math.sign(this.vx)) || this.guardFacing;
+        if (desired === this.guardFacing) {
+          this.guardTurnTimer = 0;
+          this.guardTurnTarget = desired;
+        } else {
+          if (desired !== this.guardTurnTarget) { this.guardTurnTarget = desired; this.guardTurnTimer = 0; }
+          this.guardTurnTimer += dt;
+          if (this.guardTurnTimer >= this.guardTurnDelay) {
+            this.guardFacing = desired;
+            this.guardTurnTimer = 0;
+          }
+        }
+      }
+
+      updateShieldCombat(dt) {
+        if (this.currentState === 'DEVOUR' || this.isDevouring) {
+          this.combatPhase = 'READY'; this.combatTimer = 0;
+          this.attackDirectionLocked = false; this.hasHitThisAttack = false;
+          return;
+        }
+        if (this.combatPhase === 'READY') {
+          if (this.currentState !== 'GUARD' || (player.x - this.x) * this.guardFacing < 0 || Math.hypot(player.x - this.x, player.y - this.y) > this.attackRange) return;
+          this.combatPhase = 'WINDUP'; this.combatTimer = this.windupDuration;
+          this.lockedFacing = this.guardFacing;
+          this.attackDirectionLocked = true; this.hasHitThisAttack = false;
+          audio.playTelegraph();
+        } else if (this.combatPhase === 'WINDUP') {
+          this.combatTimer -= dt;
+          if (this.combatTimer <= 0) { this.combatPhase = 'ACTIVE'; this.combatTimer = 100; }
+        } else if (this.combatPhase === 'ACTIVE') {
+          this.combatTimer -= dt;
+          const forward = (player.x - this.x) * this.lockedFacing;
+          if (!this.hasHitThisAttack && forward >= 0 && forward <= this.attackRange * 1.25 && Math.abs(player.y - this.y) < 35) {
+            const accepted = player.takeDamage(this.dmg, 'SHIELDBEARER');
+            this.hasHitThisAttack = true;
+            if (accepted) {
+              player.vx = this.lockedFacing * (this.consumedTraits.brute > 0 ? 13 + this.consumedTraits.brute * 2 : this.bashKnockback);
+              if (this.consumedTraits.brute > 0) {
+                player.vy = -6; player.isGrounded = false; coyoteTimer = 0;
+                screenShake = 12;
+              }
+              validatePlayerPhysics();
+            }
+          }
+          if (this.combatTimer <= 0) {
+            this.combatPhase = 'RECOVERY'; this.combatTimer = this.recoveryDuration;
+            this.attackDirectionLocked = false;
+          }
+        } else if (this.combatPhase === 'RECOVERY') {
+          this.combatTimer -= dt;
+          if (this.combatTimer <= 0) {
+            this.combatPhase = 'READY'; this.attackDirectionLocked = false; this.hasHitThisAttack = false;
+          }
+        }
+      }
+
       archerHasShotLine() {
         const x = this.x, y = this.y - 36 * this.scale;
         return [...obstacles.filter(o => !o.broken), ...platforms].every(box =>
@@ -2723,6 +2847,7 @@
       updateCombat(dt) {
         if (this.isStunned > 0 || this.isTransforming || gameState === 'GAME_OVER' || gameState === 'VICTORY') return;
         if (this.type === 'archer') { this.updateArcherCombat(dt); return; }
+        if (this.type === 'shieldbearer') { this.updateShieldCombat(dt); return; }
 
         if (this.currentState === 'BREAK_OBSTACLE' && this.targetObstacle && !this.targetObstacle.broken) {
           if (this.combatPhase === 'READY') {
@@ -2850,6 +2975,9 @@
           }
 
           switch (this.currentState) {
+            case 'GUARD':
+              if (distToPlayer > this.attackRange * 0.85 && this.combatPhase !== 'WINDUP' && this.combatPhase !== 'ACTIVE') moveDir = Math.sign(player.x - this.x);
+              break;
             case 'ARCHER_AIM':
             case 'ARCHER_SHOOT':
               moveDir = 0;
@@ -3064,6 +3192,8 @@
           this.vx *= 0.88;
         }
 
+        if (this.type === 'shieldbearer') this.facing = this.guardFacing;
+
         if (this.consumedTraits.scout > 0 && Math.abs(this.vx) > 1.8) {
           this.ghostTrails.push({ x: this.x, y: this.y, facing: this.facing, alpha: 0.45 });
         }
@@ -3146,6 +3276,7 @@
         }
 
         this.updatePerception(dt);
+        if (this.type === 'shieldbearer') this.updateShieldGuard(dt);
 
         this.decisionTimer += dt;
         if (this.decisionTimer >= this.decisionInterval) {
@@ -3285,6 +3416,26 @@
         c.lineTo(handX, handY);
         c.stroke();
 
+        if (this.type === 'shieldbearer') {
+          c.save(); // Escudo: conserva el scope de mutación y lo restaura al salir.
+          const guarded = this.isShieldGuardActive();
+          const push = this.combatPhase === 'ACTIVE' ? 8 : (this.combatPhase === 'WINDUP' ? -2 : 0);
+          const shieldX = posX + this.guardFacing * (18 + push) * s;
+          const shieldY = shoulderY + (guarded ? 0 : 12) * s;
+          c.strokeStyle = this.color; c.lineWidth = 2.5 * s;
+          c.beginPath(); c.moveTo(posX, shoulderY); c.lineTo(shieldX, shieldY + 2 * s); c.stroke();
+          c.fillStyle = this.blockFlash > 0 ? '#dbeafe' : (guarded ? '#334e68' : '#263544');
+          c.strokeStyle = this.blockFlash > 0 ? '#fff' : '#93c5fd';
+          c.lineWidth = 2 * s;
+          if (this.blockFlash > 0) { c.shadowBlur = 12; c.shadowColor = '#bfdbfe'; }
+          c.beginPath(); c.moveTo(shieldX - 8 * s, shieldY - 15 * s);
+          c.lineTo(shieldX + 8 * s, shieldY - 15 * s); c.lineTo(shieldX + 8 * s, shieldY + 12 * s);
+          c.lineTo(shieldX, shieldY + 21 * s); c.lineTo(shieldX - 8 * s, shieldY + 12 * s);
+          c.closePath(); c.fill(); c.stroke();
+          c.beginPath(); c.moveTo(shieldX, shieldY - 10 * s); c.lineTo(shieldX, shieldY + 13 * s); c.stroke();
+          c.restore();
+        }
+
         if (this.type === 'archer') {
           c.save(); // Arco y carcaj aislados del render común del duende.
           c.strokeStyle = '#92400e'; c.lineWidth = 4;
@@ -3349,10 +3500,11 @@
           const debugBoxW = 125;
           let debugBoxH = this.isMutated ? 58 : 48;
           if (this.type === 'archer') debugBoxH += 22;
+          if (this.type === 'shieldbearer') debugBoxH += 44;
           if (this.isStunned > 0 || this.isTransforming) debugBoxH += 11;
 
           const dbgX = posX - debugBoxW / 2;
-          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0);
+          const dbgY = headY - (this.isMutated ? 80 : 65) * s - (this.isStunned > 0 || this.isTransforming ? 12 : 0) - (this.type === 'shieldbearer' ? 44 : 0);
 
           c.fillStyle = 'rgba(15, 23, 42, 0.9)';
           c.strokeStyle = '#38bdf8';
@@ -3397,6 +3549,14 @@
             c.fillStyle = '#fde68a';
             c.fillText(`DIST: ${Math.round(Math.hypot(player.x - this.x, player.y - this.y))}`, dbgX + 5, currentLineY);
             c.fillText(`SHOT: ${this.shotPhase}`, dbgX + 5, currentLineY + 11);
+          }
+          if (this.type === 'shieldbearer') {
+            c.fillStyle = '#93c5fd';
+            c.fillText(`GUARD: ${this.isShieldGuardActive() ? 'ON' : 'OFF'}`, dbgX + 5, currentLineY);
+            c.fillText(`FACING: ${this.guardFacing}`, dbgX + 5, currentLineY + 11);
+            const turn = this.attackDirectionLocked ? 'LOCK' : `${this.guardTurnTimer.toFixed(0)} / ${this.guardTurnDelay}ms`;
+            c.fillText(`TURN: ${turn}`, dbgX + 5, currentLineY + 22);
+            c.fillText(`BLOCK: ${Math.round(this.frontalReduction * 100)}% / AoE ${Math.round(this.aoeReduction * 100)}%`, dbgX + 5, currentLineY + 33);
           }
         }
 
