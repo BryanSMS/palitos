@@ -622,8 +622,7 @@
 
         for (const corpse of availableCorpses) {
           for (const goblin of availableGoblins) {
-            const dY = Math.abs(goblin.y - corpse.y);
-            const reachable = dY < 45 || goblin.canReachHeight(corpse.y < goblin.y ? goblin.y - corpse.y : 0);
+            const reachable = goblin.canReachCorpse(corpse);
             if (reachable) {
               const dist = Math.hypot(goblin.x - corpse.x, goblin.y - corpse.y);
               if (dist < bestDist) {
@@ -636,13 +635,7 @@
 
         if (bestPair) {
           const { goblin, corpse } = bestPair;
-          corpse.reserved = true;
-          corpse.reservedBy = goblin;
-          goblin.targetCorpse = corpse;
-          goblin.currentState = 'DEVOUR';
-          goblin.currentTargetName = `Cadáver [${corpse.type.toUpperCase()}]`;
-          goblin.devourTimer = 0;
-          goblin.isDevouring = false;
+          goblin.beginDevour(corpse);
           this.dominatingTimer = 0;
         }
       },
@@ -829,6 +822,13 @@
           this.y = Math.min(groundY, this.y + this.fallVelocity * (dt / FIXED_STEP_MS));
         }
         this.totalLife += dt;
+        if (this.reserved && this.reservedBy &&
+            (this.reservedBy.dead || this.reservedBy.targetCorpse !== this ||
+             (this.reservedBy.currentState !== 'DEVOUR' && !this.reservedBy.isTransforming))) {
+          if (this.reservedBy.targetCorpse === this) this.reservedBy.releaseDevourReservation();
+          this.reserved = false;
+          this.reservedBy = null;
+        }
 
         if (this.reserved && this.reservedBy && !this.reservedBy.dead && (this.reservedBy.currentState === 'DEVOUR' || this.reservedBy.isTransforming)) {
           if (this.totalLife < this.maxReservedLife) {
@@ -845,6 +845,7 @@
         }
 
         if (this.lifeTime <= 0) this.dead = true;
+        if (this.dead && this.reservedBy?.targetCorpse === this) this.reservedBy.releaseDevourReservation();
       }
 
       draw(c) {
@@ -2137,25 +2138,42 @@
       }
     }
 
+    // Conserva las hitboxes circulares existentes, pero barre todo el trayecto.
+    function segmentCircleHit(x0, y0, x1, y1, cx, cy, radius) {
+      const dx = x1 - x0, dy = y1 - y0, ox = x0 - cx, oy = y0 - cy;
+      const c = ox * ox + oy * oy - radius * radius;
+      if (c <= 0) return 0;
+      const a = dx * dx + dy * dy;
+      if (a <= 1e-12) return null;
+      const b = ox * dx + oy * dy, discriminant = b * b - a * c;
+      if (discriminant < 0) return null;
+      const t = (-b - Math.sqrt(discriminant)) / a;
+      return t >= 0 && t <= 1 ? t : null;
+    }
+
     class MagicOrb {
       constructor(x, y, angle, speed, dmg, color, size, piercing = false) {
         this.x = x; this.y = y;
         this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed;
         this.dmg = dmg; this.color = color; this.size = size; this.piercing = piercing;
+        this.hitEnemies = new Set();
         this.sourceType = currentClassKey.toUpperCase();
         this.damageType = 'projectile';
         this.dead = false;
       }
       update() {
+        if (this.dead || gameState !== 'PLAYING') return;
         const source = { x: this.x, y: this.y, damageType: this.damageType, sourceType: this.sourceType };
         this.x += this.vx; this.y += this.vy;
         if (this.x < 0 || this.x > width || this.y < 0 || this.y > groundY) this.dead = true;
 
-        for (const d of duendes) {
-          if (Math.hypot(d.x - this.x, (d.y - 20) - this.y) <= this.size + 14) {
-            d.takeDamage(this.dmg, source);
-            if (!this.piercing) { this.dead = true; break; }
-          }
+        const hits = duendes.filter(d => !d.dead && !this.hitEnemies.has(d))
+          .map(d => ({ d, t: segmentCircleHit(source.x, source.y, this.x, this.y, d.x, d.y - 20, this.size + 14) }))
+          .filter(hit => hit.t !== null).sort((a, b) => a.t - b.t);
+        for (const { d } of hits) {
+          this.hitEnemies.add(d);
+          d.takeDamage(this.dmg, source);
+          if (!this.piercing) { this.dead = true; break; }
         }
       }
       draw(c) {
@@ -2172,19 +2190,23 @@
         this.x = x; this.y = y; this.angle = angle;
         this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed;
         this.dmg = dmg; this.color = color; this.dead = false;
+        this.hitEnemies = new Set(); // WaveBlade también atraviesa: un impacto por enemigo.
         this.sourceType = currentClassKey.toUpperCase();
         this.damageType = 'projectile';
       }
       update() {
+        if (this.dead || gameState !== 'PLAYING') return;
         const source = { x: this.x, y: this.y, damageType: this.damageType, sourceType: this.sourceType };
         this.x += this.vx; this.y += this.vy;
         if (this.x < 0 || this.x > width || this.y < 0 || this.y > groundY) this.dead = true;
 
-        for (const d of duendes) {
-          if (Math.hypot(d.x - this.x, (d.y - 20) - this.y) <= 25) {
-            d.takeDamage(this.dmg, source);
-            d.vx = this.vx * 0.4;
-          }
+        const hits = duendes.filter(d => !d.dead && !this.hitEnemies.has(d))
+          .map(d => ({ d, t: segmentCircleHit(source.x, source.y, this.x, this.y, d.x, d.y - 20, 25) }))
+          .filter(hit => hit.t !== null).sort((a, b) => a.t - b.t);
+        for (const { d } of hits) {
+          this.hitEnemies.add(d);
+          d.takeDamage(this.dmg, source);
+          d.vx = this.vx * 0.4;
         }
       }
       draw(c) {
@@ -2686,8 +2708,76 @@
         return verticalDifference <= maxJumpHeight + 8;
       }
 
+      canReachCorpse(corpse) {
+        if (![corpse.x, corpse.y].every(Number.isFinite)) return false;
+        if (this.movementType === 'flying') {
+          const margin = Math.min(25, width / 2);
+          const bottom = Math.max(0, groundY), top = Math.min(70 * this.scale, bottom);
+          if (corpse.x < margin || corpse.x > width - margin || corpse.y < top || corpse.y > bottom) return false;
+          const radius = 8 * this.scale;
+          return [...obstacles.filter(o => !o.broken), ...platforms].every(box =>
+            !(corpse.x > box.x - radius && corpse.x < box.x + box.w + radius &&
+              corpse.y > box.y && corpse.y < box.y + box.h + 48 * this.scale));
+        }
+        const dY = Math.abs(this.y - corpse.y);
+        return dY < 45 || this.canReachHeight(corpse.y < this.y ? this.y - corpse.y : 0);
+      }
+
+      cancelOffense() {
+        this.combatPhase = 'READY';
+        this.combatTimer = 0;
+        this.hasHitThisAttack = false;
+        this.attackDirectionLocked = false;
+        this.targetObstacle = null;
+        this.isBracing = false;
+        this.braceTimer = 0;
+        if (this.type === 'archer') { this.shotPhase = 'READY'; this.shotTimer = 0; }
+        if (this.type === 'shaman') this.cancelShamanSpell();
+        if (this.movementType === 'flying') this.cancelFlyingAttack();
+      }
+
+      beginDevour(corpse) {
+        this.cancelOffense();
+        corpse.reserved = true;
+        corpse.reservedBy = this;
+        this.targetCorpse = corpse;
+        this.currentState = 'DEVOUR';
+        this.currentTargetName = `Cadáver [${corpse.type.toUpperCase()}]`;
+        this.devourTimer = 0;
+        this.isDevouring = false;
+      }
+
+      releaseDevourReservation() {
+        const corpse = this.targetCorpse;
+        const interrupted = !this.isTransforming &&
+          (this.currentState === 'DEVOUR' || this.isDevouring || (corpse && corpse.reservedBy === this));
+        // No liberar una reserva que ahora pertenezca a otro consumidor.
+        if (corpse && (!corpse.reservedBy || corpse.reservedBy === this)) {
+          corpse.reserved = false;
+          corpse.reservedBy = null;
+        }
+        this.targetCorpse = null;
+        this.isDevouring = false;
+        this.devourTimer = 0;
+        if (this.currentState === 'DEVOUR') {
+          this.currentState = 'PATROL';
+          this.currentTargetName = 'Ruta';
+        }
+        if (interrupted) AdaptiveDirector.notifyMutationInterrupted();
+      }
+
+      validateDevourReservation() {
+        const corpse = this.targetCorpse;
+        if (corpse && (corpse.dead || corpse.lifeTime <= 0 || !corpse.reserved || corpse.reservedBy !== this ||
+            this.currentState !== 'DEVOUR' || (this.movementType === 'flying' && !this.canReachCorpse(corpse)))) {
+          this.releaseDevourReservation();
+        } else if (!corpse && (this.currentState === 'DEVOUR' || this.isDevouring)) {
+          this.releaseDevourReservation();
+        }
+      }
+
       takeDamage(amount, source = null) {
-        if (this.dead || isRunFinished()) return;
+        if (this.dead || isRunFinished() || !Number.isFinite(amount) || amount <= 0) return;
         if (this.type === 'shieldbearer' && this.isShieldGuardActive() && source && Number.isFinite(source.x) && Number.isFinite(source.y)) {
           const forward = (source.x - this.x) * this.guardFacing;
           const vertical = source.y - (this.y - 30 * this.scale);
@@ -2712,17 +2802,10 @@
 
         // Interrupción de DEVOUR
         if ((this.isDevouring || this.currentState === 'DEVOUR') && !this.isTransforming) {
-          if (this.targetCorpse) {
-            this.targetCorpse.reserved = false;
-            this.targetCorpse.reservedBy = null;
-            this.targetCorpse = null;
-          }
-          this.isDevouring = false;
-          this.devourTimer = 0;
+          this.releaseDevourReservation();
           this.isStunned = 800;
           this.yellowFlash = 12;
           this.currentState = 'PATROL';
-          AdaptiveDirector.notifyMutationInterrupted();
           damageNumbers.push(new DamageNumber(this.x, this.y - 45, '¡INTERRUMPIDO!', '#fbbf24'));
         }
 
@@ -3003,7 +3086,7 @@
           if (!this.hasHitThisAttack && forward >= 0 && forward <= this.attackRange * 1.25 && Math.abs(player.y - this.y) < 35) {
             const accepted = player.takeDamage(this.effectiveDamage(), 'SHIELDBEARER');
             this.hasHitThisAttack = true;
-            if (accepted) {
+            if (accepted && !isRunFinished()) {
               player.vx = this.lockedFacing * (this.consumedTraits.brute > 0 ? 13 + this.consumedTraits.brute * 2 : this.bashKnockback);
               if (this.consumedTraits.brute > 0) {
                 player.vy = -6; player.isGrounded = false; coyoteTimer = 0;
@@ -3469,7 +3552,16 @@
         if (this.type === 'archer') { this.updateArcherCombat(dt); return; }
         if (this.type === 'shieldbearer') { this.updateShieldCombat(dt); return; }
 
-        if (this.currentState === 'BREAK_OBSTACLE' && this.targetObstacle && !this.targetObstacle.broken) {
+        if (this.currentState === 'DEVOUR' || this.isDevouring) {
+          this.cancelOffense();
+          return;
+        }
+
+        if (this.currentState === 'BREAK_OBSTACLE') {
+          if (!this.targetObstacle || this.targetObstacle.broken) {
+            this.cancelOffense();
+            return;
+          }
           if (this.combatPhase === 'READY') {
             this.combatPhase = 'WINDUP';
             this.combatTimer = this.windupDuration;
@@ -3478,6 +3570,14 @@
           } else if (this.combatPhase === 'WINDUP') {
             this.combatTimer -= dt;
             if (this.combatTimer <= 0) {
+              const obstacle = this.targetObstacle;
+              const torsoY = this.y - 25 * this.scale;
+              const nearX = Math.max(obstacle.x, Math.min(obstacle.x + obstacle.w, this.x));
+              const nearY = Math.max(obstacle.y, Math.min(obstacle.y + obstacle.h, torsoY));
+              if (Math.hypot(this.x - nearX, torsoY - nearY) > this.attackRange * 1.25) {
+                this.cancelOffense();
+                return;
+              }
               this.combatPhase = 'ACTIVE';
               this.combatTimer = 110;
               this.targetObstacle.hp -= 20;
@@ -3545,7 +3645,7 @@
             if (inRangeX && inRangeY) {
               const accepted = player.takeDamage(this.effectiveDamage(), this.type.toUpperCase());
               this.hasHitThisAttack = true;
-              if (accepted && (this.type === 'brute' || this.consumedTraits.brute > 0)) {
+              if (accepted && !isRunFinished() && (this.type === 'brute' || this.consumedTraits.brute > 0)) {
                 player.vx = this.lockedFacing * (13 + this.consumedTraits.brute * 2);
                 player.vy = -6;
                 player.isGrounded = false;
@@ -3648,8 +3748,8 @@
             case 'DEVOUR':
               if (this.targetCorpse && !this.targetCorpse.dead) {
                 const diffX = this.targetCorpse.x - this.x;
-                if (Math.abs(diffX) > 20) {
-                  moveDir = Math.sign(diffX);
+                if (Math.abs(diffX) > 20 || Math.abs(this.y - this.targetCorpse.y) > 12 || !this.isGrounded || Math.abs(this.vy) > 0.01) {
+                  moveDir = Math.abs(diffX) > 20 ? Math.sign(diffX) : 0;
                   this.isDevouring = false;
                   this.devourTimer = 0;
                 } else {
@@ -3710,11 +3810,7 @@
                   }
                 }
               } else {
-                this.currentState = 'PATROL';
-                this.targetCorpse = null;
-                this.isDevouring = false;
-                this.devourTimer = 0;
-                AdaptiveDirector.notifyMutationInterrupted();
+                this.releaseDevourReservation();
               }
               break;
 
@@ -3924,6 +4020,7 @@
 
       update(dt) {
         if (this.dead || isRunFinished()) return;
+        this.validateDevourReservation(); // Antes de que la reevaluación pueda reemplazar DEVOUR.
         this.buffTimer = Math.max(0, this.buffTimer - dt);
         this.buffActive = this.buffTimer > 0;
         this.mutationNoticeTimer = Math.max(0, this.mutationNoticeTimer - dt);
