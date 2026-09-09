@@ -4727,6 +4727,88 @@
       }
     }
 
+    class KingVolatileBlast {
+      constructor(x,y){this.x=x;this.y=y;this.alpha=1;}
+      update(dt){this.alpha=Math.max(0,this.alpha-dt/430);}
+      draw(c){
+        const p=1-this.alpha;c.save();c.globalAlpha=this.alpha;
+        for(let i=0;i<8;i++){
+          const a=i*Math.PI/4,r=20+p*65;
+          c.fillStyle=i%2?'#826f65':'#e2b27d';c.globalAlpha=this.alpha*0.45;
+          c.beginPath();c.arc(this.x+Math.cos(a)*r*.65,this.y+Math.sin(a)*r*.35-p*28,10+p*12,0,Math.PI*2);c.fill();
+          c.strokeStyle='#e8bd8b';c.lineWidth=1;c.beginPath();c.moveTo(this.x+Math.cos(a)*r*.6,this.y+Math.sin(a)*r*.4);c.lineTo(this.x+Math.cos(a)*r,this.y+Math.sin(a)*r*.65);c.stroke();
+        }
+        c.globalAlpha=this.alpha*this.alpha;c.fillStyle='#fff0c8';c.beginPath();c.arc(this.x,this.y,14*this.alpha,0,Math.PI*2);c.fill();c.restore();
+      }
+    }
+    class KingVolatileBomb {
+      constructor(x,y,vx,vy){
+        this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.gravity=0.28;this.radius=13;this.rotation=0;
+        this.state='FLYING';this.runId=currentRunId;this.dead=false;this.age=0;this.support=null;
+        this.fuseStarted=false;this.fuseTimer=850;this.damage=24;this.explosionRadius=98;
+        this.sourceType='GOBLIN_KING_BOMBER';this.damageType='aoe';
+      }
+      update(dt){
+        if(this.dead)return;
+        if(this.runId!==currentRunId||isRunFinished()){this.dead=true;return;}
+        if(gameState!=='PLAYING')return;
+        if(![this.x,this.y,this.vx,this.vy].every(Number.isFinite)){this.dead=true;return;}
+        this.age+=dt;
+        if(this.fuseStarted){this.fuseTimer=Math.max(0,this.fuseTimer-dt);if(this.fuseTimer===0){this.explode();return;}}
+        if(this.state==='ARMED'){
+          if(this.support&&(this.support.broken||this.support.bossBroken||!platforms.includes(this.support)&&!obstacles.includes(this.support))){this.state='FLYING';this.support=null;}
+          else return;
+        }
+        const step=dt/FIXED_STEP_MS;this.vy+=this.gravity*step;
+        const nx=this.x+this.vx*step,ny=this.y+this.vy*step,hit=KingPlatformChunk.hitScene(this.x,this.y,nx,ny,this.radius);
+        if(hit){
+          const oldY=this.y;this.x+=(nx-this.x)*Math.max(0,hit.t-0.001);this.y+=(ny-this.y)*Math.max(0,hit.t-0.001);
+          this.fuseStarted=true;
+          if(this.vy>=0&&oldY<=hit.box.y-this.radius+0.01){
+            this.y=hit.box.y-this.radius;this.vx=this.vy=0;this.state='ARMED';this.support=hit.box.y===groundY?null:hit.box;
+          }else{this.vx=0;this.vy=Math.max(0.5,this.vy);} // Sin rebote: contacto lateral y caída con peso.
+        }else{this.x=nx;this.y=ny;}
+        this.rotation+=this.vx*0.012*step;
+        if(this.age>10000||this.x< -80||this.x>width+80||this.y>groundY+100)this.dead=true;
+      }
+      explode(){
+        if(this.dead||gameState!=='PLAYING'||this.runId!==currentRunId)return;
+        this.dead=true;this.state='EXPLODED';activeVisuals.push(new KingVolatileBlast(this.x,this.y));
+        for(let i=0;i<14;i++)activeVisuals.push(new StoneDebris(this.x,this.y));
+        screenShake=Math.max(screenShake,9);audio.playSlam(0.2);
+        const x=kingClamp(this.x,player.x-12,player.x+12),y=kingClamp(this.y,player.y-55,player.y);
+        if(Math.hypot(x-this.x,y-this.y)>this.explosionRadius)return;
+        if([...platforms,...obstacles.filter(o=>!o.broken)].some(o=>segmentBoxHit(this.x,this.y,x,y,o)!==null))return;
+        const accepted=player.takeDamage(this.damage,this.sourceType);
+        if(accepted&&!isRunFinished()){player.vx=(Math.sign(player.x-this.x)||1)*5;player.vy=-4;player.isGrounded=false;coyoteTimer=0;}
+      }
+      remapResize(ratioX,deltaY){
+        this.x*=ratioX;this.y+=deltaY;this.vx*=ratioX;
+        if(this.state==='ARMED'){
+          if(this.support&&!this.support.broken&&!this.support.bossBroken){this.x=kingClamp(this.x,this.support.x,this.support.x+this.support.w);this.y=this.support.y-this.radius;}
+          else if(!this.support)this.y=groundY-this.radius;
+          else{this.support=null;this.state='FLYING';}
+        }else if(KingPlatformChunk.hitScene(this.x,this.y,this.x,this.y,this.radius))this.dead=true;
+      }
+      static drawMass(c,x,y,rotation,pulse=0){
+        c.save();c.translate(x,y);c.rotate(rotation);c.scale(1+pulse*.08,1+pulse*.04);
+        c.fillStyle='#725047';c.strokeStyle='#bd976a';c.lineWidth=1.5;c.beginPath();
+        c.moveTo(-13,-5);c.lineTo(-6,-14);c.lineTo(5,-10);c.lineTo(14,-3);c.lineTo(9,11);c.lineTo(-3,14);c.lineTo(-14,5);c.closePath();c.fill();c.stroke();
+        c.strokeStyle=pulse>.4?'#ffe0a0':'#eaa066';c.lineWidth=1+pulse;
+        c.beginPath();c.moveTo(-6,-10);c.lineTo(2,-3);c.lineTo(-2,4);c.lineTo(5,10);c.stroke();
+        c.strokeStyle='rgba(161,146,130,0.5)';c.lineWidth=2;c.beginPath();c.moveTo(0,-12);c.lineTo(4+Math.sin(simulationTime*.014)*3,-23);c.lineTo(-2,-30);c.stroke();c.restore();
+      }
+      draw(c){
+        if(this.dead)return;
+        const urgency=this.fuseStarted?1-this.fuseTimer/850:0,pulse=(1+Math.sin(this.age*(.016+urgency*.07)))*.5;
+        KingVolatileBomb.drawMass(c,this.x+urgency*Math.sin(this.age*.15),this.y,this.rotation,pulse);
+        if(this.state==='ARMED'){
+          c.save();c.globalAlpha=.12+urgency*.35;c.strokeStyle='#deae7b';c.lineWidth=1;
+          for(let i=0;i<6;i++){const dx=(i-2.5)*32;c.beginPath();c.moveTo(this.x+dx*.7,this.y+this.radius);c.lineTo(this.x+dx,this.y+this.radius-3-urgency*5);c.stroke();}c.restore();
+        }
+      }
+    }
+
     class GoblinKing {
       constructor(x, y, facing) {
         this.x=x; this.y=y; this.facing=facing || 1;
@@ -4768,6 +4850,8 @@
         this.decisionLatency=0;this.decisionWait=0;this.tacticalEvaluations=0;
         this.observedGrounded=player.isGrounded;this.observedAttack=false;this.landingOpportunity=0;this.attackOpportunity=0;
         this.boneCooldown=0;this.boneTarget=null;this.boneLocked=false;this.boneProjectile=null;this.boneAngle=0;
+        this.volatileBomb=null;this.bombCooldown=0;this.bombTarget=null;this.bombPlan=null;this.bombLocked=false;
+        this.bombStillTime=0;this.bombRegionTime=0;this.bombObservedRegion=null;
       }
       getHitboxes() {
         const s=this.scale;
@@ -4930,6 +5014,7 @@
         }
         if(part==='body')draw('bomber',()=>{
             for(let i=0;i<3;i++){
+              if(i===0&&this.currentState.startsWith('KING_BOMB_')&&this.bombTarget)continue;
               const x=-7+i*7,y=-35+(i%2)*7;
               this.polygon(c,[[x-5,y-4],[x+2,y-7],[x+6,y],[x,y+6],[x-6,y+3]],'#67534b');
               this.line(c,[[x-2,y-4],[x+1,y],[x-2,y+4]],'#efa86d',1+0.3*Math.sin(t*0.009+i));
@@ -5419,6 +5504,11 @@
       drawEnvironment(c) {
         if(this.platformChunk)this.platformChunk.draw(c);
         if(this.boneProjectile)this.boneProjectile.draw(c);
+        if(this.volatileBomb)this.volatileBomb.draw(c);
+        if(this.bombTarget&&['KING_BOMB_PREP','KING_BOMB_AIM'].includes(this.currentState)){
+          const hand=this.localToWorld(this.attackPose().hand);
+          KingVolatileBomb.drawMass(c,hand.x,hand.y,0,.5+.5*Math.sin(this.poseTime*.025));
+        }
       }
       clearEnvironment() {
         if(this.platformChunk)this.platformChunk.dead=true;
@@ -5740,6 +5830,66 @@
         if(!attacking&&this.observedAttack)this.attackOpportunity=300;
         this.observedGrounded=player.isGrounded;this.observedAttack=attacking;
       }
+      kingBombHand() { return this.localToWorld([22,-45]); }
+      kingBombZone() {
+        const x=kingClamp(player.x+kingClamp(player.vx*12,-70,70),20,width-20);
+        const surface=[...platforms,{x:0,y:groundY,w:width}].filter(p=>x>=p.x+13&&x<=p.x+p.w-13&&p.y>=player.y-12).sort((a,b)=>a.y-b.y)[0];
+        return surface?{x,y:surface.y-13}:null;
+      }
+      planKingBombThrow(target=this.kingBombZone()) {
+        if(!this.bossTraits.bomber||this.isRoyalRitual()||!target)return null;
+        const origin=this.kingBombHand();
+        if(Math.abs(player.x-this.x)<180||KingPlatformChunk.hitScene(origin.x,origin.y,origin.x,origin.y,13))return null;
+        for(const steps of [48,60,72,84]){
+          const vx=(target.x-origin.x)/steps,vy=(target.y-origin.y-0.28*steps*(steps+1)/2)/steps;
+          if(Math.abs(vx)>10||vy< -20||vy>5)continue;
+          let x=origin.x,y=origin.y,v=vy,valid=true,landed=false;
+          for(let i=1;i<=steps+1;i++){
+            const nx=x+vx,ny=y+(v+=0.28),hit=KingPlatformChunk.hitScene(x,y,nx,ny,13);
+            if(hit){landed=i>=steps-1&&v>0&&Math.abs(hit.box.y-13-target.y)<1&&Math.abs(nx-target.x)<25;valid=landed;break;}
+            x=nx;y=ny;
+          }
+          if(valid&&landed)return {vx,vy,steps,x:target.x,y:target.y};
+        }
+        return null;
+      }
+      beginKingBomb() {
+        if(!this.isCombatReady()||this.isRoyalRitual()||this.bombCooldown>0||this.volatileBomb&&!this.volatileBomb.dead)return false;
+        const plan=this.planKingBombThrow();if(!plan)return false;
+        this.bombPlan=plan;this.bombTarget={x:plan.x,y:plan.y};this.bombLocked=false;
+        this.comboCount=0;this.action='BOMB_THROW';this.rememberAction('BOMB_THROW');this.setState('KING_BOMB_PREP',540);return true;
+      }
+      clearBombPower() {
+        if(this.volatileBomb)this.volatileBomb.dead=true;
+        this.volatileBomb=null;this.bombTarget=this.bombPlan=null;this.bombLocked=false;this.bombCooldown=0;
+        this.bombStillTime=this.bombRegionTime=0;this.bombObservedRegion=null;
+      }
+      updateKingBomb(dt) {
+        if(!this.currentState.startsWith('KING_BOMB_')){
+          if(this.bombTarget){this.bombTarget=this.bombPlan=null;this.bombLocked=false;this.bombCooldown=Math.max(this.bombCooldown,1200);}return false;
+        }
+        if(this.currentState==='KING_BOMB_PREP'){
+          if(this.actionTimer===0)this.setState('KING_BOMB_AIM',600);
+        }else if(this.currentState==='KING_BOMB_AIM'){
+          if(!this.bombLocked){
+            const zone=this.kingBombZone();
+            const target=zone?{x:this.bombTarget.x+(zone.x-this.bombTarget.x)*0.2,y:zone.y}:null;
+            const plan=this.planKingBombThrow(target);
+            if(!plan){this.bombTarget=this.bombPlan=null;this.bombCooldown=1200;this.setState('KING_BOMB_RECOVER',450);return true;}
+            this.bombTarget=target;this.bombPlan=plan;if(this.actionTimer<=260)this.bombLocked=true;
+          }
+          if(this.actionTimer===0){
+            const hand=this.kingBombHand();
+            if(!KingPlatformChunk.hitScene(hand.x,hand.y,hand.x,hand.y,13)&&(!this.volatileBomb||this.volatileBomb.dead))
+              this.volatileBomb=new KingVolatileBomb(hand.x,hand.y,this.bombPlan.vx,this.bombPlan.vy);
+            this.bombCooldown=5600;this.setState('KING_BOMB_THROW',180);audio.playSword(95);
+            for(let i=0;i<5;i++)activeVisuals.push(new ArcaneParticle(hand.x,hand.y,'#d89664'));
+          }
+        }else if(this.currentState==='KING_BOMB_THROW'){
+          if(this.actionTimer===0)this.setState('KING_BOMB_RECOVER',450);
+        }else if(this.actionTimer===0){this.bombTarget=this.bombPlan=null;this.bombLocked=false;this.setState('KING_IDLE',0);}
+        return true;
+      }
       evaluateTacticalSituation() {
         this.perceivePlayer(0);
         const p=this.playerSpatial,dist=Math.abs(p.dx),front=p.dx*this.facing>=0;
@@ -5803,6 +5953,9 @@
           add('RANGED_PRESSURE','BONE_SHOT',0.76+Math.min(0.16,s.dist/3000)+(s.above?0.12:0)+(s.speed<1?0.06:0)-(this.blocked?0.25:0),
             'ARCHER_READY + CLEAR_SHOT'+(s.above?' + ELEVATED_PLAYER':''));
         add('RECOVER','WAIT',0.08,'NO_USEFUL_COMMITMENT');
+        if(this.bossTraits.bomber&&this.bombCooldown===0&&(!this.volatileBomb||this.volatileBomb.dead)&&s.dist>180&&s.front&&this.planKingBombThrow())
+          add('AREA_CONTROL','BOMB_THROW',0.7+Math.min(.18,this.bombStillTime/20000)+Math.min(.1,this.bombRegionTime/40000)+(s.above?.12:0)+Math.min(.08,s.dist/6000)-(this.blocked?.25:0),
+            'VALID_ARC + ZONE_DENIAL'+(this.bombStillTime>1500?' + OBSERVED_STILLNESS':''));
         for(const option of options)option.score=this.scoreKingAction(option);
         return options.sort((a,b)=>b.score-a.score);
       }
@@ -5819,6 +5972,7 @@
         if(['HEAVY_FIST','WEAPON_SWEEP','GROUND_CRUSH'].includes(best.action)){this.comboCount=1;this.beginAttack(best.action);return;}
         if(best.action==='GUARD'){this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;}
         if(best.action==='BONE_SHOT'&&this.beginBoneShot())return;
+        if(best.action==='BOMB_THROW'&&this.beginKingBomb())return;
         if(best.action==='CHUNK'&&this.beginChunkGrab())return;
         if(best.action==='REPOSITION'&&!s.front&&s.dist<155){this.setState('KING_IDLE',150);return;} // Giro existente de 280 ms, nunca instantáneo.
         if(best.action==='INTERCEPT'){
@@ -5914,6 +6068,15 @@
         const swing=active?kingEase(1-this.actionTimer/this.actionDuration):this.currentState==='KING_RECOVER'?1:0;
         const mix=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
         const pose={hand:[30,-7],elbow:[26,-25],offHand:[-27,-31],weaponAngle:0,lean:0,crouch:0};
+        if(this.currentState.startsWith('KING_BOMB_')){
+          const prep=this.currentState==='KING_BOMB_PREP',p=prep?kingEase(1-this.actionTimer/540):1;
+          const detach=kingEase(kingClamp((p-.3)/.7,0,1));
+          pose.lean=-0.035*detach;pose.crouch=detach;
+          pose.hand=prep?mix([-7,-35],[22,-45],detach):[22,-45];pose.elbow=[14,-32];pose.offHand=[-7,-32];
+          if(this.currentState==='KING_BOMB_THROW')pose.hand=mix([22,-45],[43,-22],kingEase(1-this.actionTimer/180));
+          if(this.currentState==='KING_BOMB_RECOVER')pose.hand=mix([30,-7],[43,-22],this.actionTimer/450);
+          return pose;
+        }
         if(this.currentState.startsWith('KING_BONE_SHOT')){
           const load=this.currentState==='KING_BONE_SHOT_PREP'?kingEase(1-this.actionTimer/420):1;
           pose.lean=-0.035*load;
@@ -6028,6 +6191,14 @@
         this.combatStarted=true;this.poseTime=simulationTime;
         this.perceivePlayer(dt);
         this.observeKingSituation(dt);
+        if(this.bossTraits.bomber){
+          const region=this.playerSpatial.region;
+          if(region!==this.bombObservedRegion){this.bombStillTime=this.bombRegionTime=0;this.bombObservedRegion=region;}
+          this.bombRegionTime=Math.min(4000,this.bombRegionTime+dt);
+          this.bombStillTime=Math.abs(player.vx)<.6&&Math.abs(player.vy)<.6?Math.min(4000,this.bombStillTime+dt):0;
+        }
+        this.bombCooldown=Math.max(0,this.bombCooldown-dt);
+        if(this.volatileBomb){this.volatileBomb.update(dt);if(this.volatileBomb?.dead)this.volatileBomb=null;if(isRunFinished())return;}
         this.tacticalTimer=Math.max(0,this.tacticalTimer-dt);this.intentCommit=Math.max(0,this.intentCommit-dt);
         if(this.currentState==='KING_IDLE'&&this.actionDuration<=150)this.decisionWait+=dt; // Separar espera geométrica de latencia táctica.
         const step=dt/FIXED_STEP_MS;
@@ -6055,6 +6226,7 @@
           !['KING_LEAP','KING_DROP'].includes(this.currentState) && this.supportAt(this.x,this.y))this.beginRoyalDevour();
         if(this.isRoyalRitual()){
           if(this.boneTarget||this.boneProjectile)this.clearBonePower();
+          if(this.bombTarget||this.volatileBomb)this.clearBombPower();
           this.actionTimer=Math.max(0,this.actionTimer-dt);
           this.updateRoyalDevour(dt);return;
         }
@@ -6065,6 +6237,7 @@
         if(isRunFinished())return;
         if(this.updateEnvironment(dt))return;
         if(this.updateBoneShot(dt))return;
+        if(this.updateKingBomb(dt))return;
         switch(this.currentState) {
           case 'KING_IDLE':
             if(this.actionTimer===0)this.decideAction();
@@ -6237,7 +6410,7 @@
             break;
         }
       }
-      stopCombat() {this.clearEnvironment();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
+      stopCombat() {this.clearEnvironment();this.clearBombPower();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
         if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
         this.navGraph=null;this.invalidateNavigation('RESIZE',false);
@@ -6280,6 +6453,9 @@
           const origin=this.boneAnchor();this.boneAngle=Math.atan2(this.boneTarget.y-origin.y,this.boneTarget.x-origin.x);
         }
         if(this.boneProjectile)this.boneProjectile.remapResize(ratioX,deltaY);
+        if(this.bombTarget){this.bombTarget.x*=ratioX;this.bombTarget.y+=deltaY;}
+        if(this.bombPlan){this.bombPlan.x*=ratioX;this.bombPlan.y+=deltaY;const hand=this.kingBombHand();this.bombPlan.vx=(this.bombPlan.x-hand.x)/this.bombPlan.steps;this.bombPlan.vy=(this.bombPlan.y-hand.y-.28*this.bombPlan.steps*(this.bombPlan.steps+1)/2)/this.bombPlan.steps;}
+        if(this.volatileBomb)this.volatileBomb.remapResize(ratioX,deltaY);
       }
       drawCombatWaves(c) {
         c.save();
@@ -6617,6 +6793,8 @@
           if(this.king) {
             const k=this.king;
             const navTarget=k.navFlightTarget||k.navExpected;
+            lines.push(`BOMBER POWER: ${k.bossTraits.bomber?'ON':'OFF'} | BOMB: ${k.bombCooldown>0?(k.bombCooldown/1000).toFixed(1)+'s':'READY'} | ACTIVE BOMB: ${!!k.volatileBomb}`,
+              `BOMB STATE: ${k.currentState.startsWith('KING_BOMB_')?k.currentState:k.volatileBomb?.state||'NONE'} | LOCK: ${k.bombLocked?'YES':'NO'} | TARGET: ${k.bombTarget?k.bombTarget.x.toFixed(0)+' / '+k.bombTarget.y.toFixed(0):'NONE'}`);
             lines.push(`ARCHER POWER: ${k.bossTraits.archer?'ON':'OFF'} | BONE SHOT: ${k.boneCooldown>0?(k.boneCooldown/1000).toFixed(1)+'s':'READY'}`,
               `BONE TARGET: ${k.boneTarget?k.boneTarget.x.toFixed(0)+' / '+k.boneTarget.y.toFixed(0):'NONE'} | BONE LOCK: ${k.boneLocked?'YES':'NO'}`);
             lines.push(`KING AI: ${k.kingIntent} ${k.intentScore.toFixed(2)} | WHY: ${k.tacticalWhy}`,
