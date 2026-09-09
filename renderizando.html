@@ -824,7 +824,7 @@
 
       update(dt) {
         // Caída sencilla de cadáveres voladores; no interviene en DEVOUR.
-        if ((this.type === 'winged' || this.type === 'bomber') && this.y < groundY) {
+        if ((this.type === 'winged' || this.type === 'bomber' || this.lostPlatformSupport) && this.y < groundY) {
           this.fallVelocity = Math.min(10, this.fallVelocity + 0.35 * (dt / FIXED_STEP_MS));
           this.y = Math.min(groundY, this.y + this.fallVelocity * (dt / FIXED_STEP_MS));
         }
@@ -1214,9 +1214,10 @@
     const ctx = canvas.getContext('2d');
     let width, height, groundY;
     let platforms = [], obstacles = [];
+    let levelPlatforms = []; // Registro persistente; platforms contiene solo superficies con soporte.
 
     function setupLevel() {
-      platforms = [
+      const resizedPlatforms = [
         { x: width * 0.08, y: groundY - 70,  w: 110, h: 12 },
         { x: width * 0.20, y: groundY - 145, w: 105, h: 12 },
         { x: width * 0.36, y: groundY - 235, w: 140, h: 12 },
@@ -1225,6 +1226,11 @@
         { x: width * 0.86, y: groundY - 110, w: 105, h: 12 },
         { x: width * 0.44, y: groundY - 340, w: 160, h: 12 }
       ];
+      // Todas las plataformas actuales son auxiliares: GROUND nunca pertenece a este registro.
+      // Una futura superficie esencial debe declarar bossBreakable:false.
+      levelPlatforms = resizedPlatforms.map((geometry,index)=>Object.assign(
+        levelPlatforms[index] || {id:'P'+index,bossBreakable:true,bossBroken:false,bossHits:0},geometry));
+      platforms = levelPlatforms.filter(p=>!p.bossBroken);
 
       const resizedObstacles = [
         { x: width * 0.32, y: groundY - 120, w: 26, h: 120, hp: 60, maxHp: 60, destructible: true, broken: false, crackLevel: 0 },
@@ -1243,7 +1249,7 @@
       const oldWidth = width;
       const oldHeight = height;
       const oldGroundY = groundY;
-      const oldPlatforms = platforms;
+      const oldPlatforms = platforms.map(p=>({...p})); // setupLevel conserva identidades y modifica geometría.
       width = canvas.width = window.innerWidth;
       height = canvas.height = window.innerHeight;
       groundY = height - 55;
@@ -2385,9 +2391,9 @@
         this.y += deltaY;
         this.vx *= ratioX;
         if (this.landed) {
-          const support = this.supportKind === 'platform' ? platforms[this.supportIndex] : this.support;
+          const support = this.support;
           if (this.supportKind === 'ground') this.y = groundY-this.radius;
-          else if (support && !support.broken) {
+          else if (support && !support.broken && !support.bossBroken) {
             this.x = Math.max(this.radius,Math.min(width-this.radius,Math.max(support.x,Math.min(support.x+support.w,this.x))));
             this.y = support.y-this.radius;
           } else this.landed = false;
@@ -2410,7 +2416,7 @@
             } else if (this.vy>=0 || kind==='ground') {
               this.y=box.y-this.radius; this.vx=this.vy=0;
               this.landed=true; this.fuseStarted=true;
-              this.supportKind=kind; this.supportIndex=index; this.support=null;
+              this.supportKind=kind; this.supportIndex=index; this.support=kind==='ground'?null:box;
             } else {
               this.y=box.y+box.h+this.radius+0.01;
               this.vy=Math.abs(this.vy)*0.25;
@@ -2431,6 +2437,7 @@
           if (!this.fuseTimer) { this.explode(); return; }
         }
         if (this.landed && this.supportKind === 'pillar' && this.support?.broken) this.landed = false;
+        if (this.landed && this.supportKind === 'platform' && (!platforms.includes(this.support)||this.support?.bossBroken)) this.landed=false;
         if (this.landed) return;
         this.vy += this.gravity;
         const nx=this.x+this.vx, ny=this.y+this.vy, r=this.radius;
@@ -2452,7 +2459,7 @@
             this.y=first.box.y-r; this.vx=this.vy=0;
             this.landed=true; this.fuseStarted=true;
             this.supportKind=first.kind; this.supportIndex=first.index;
-            this.support=first.kind==='pillar' ? first.box : null;
+            this.support=first.kind==='ground' ? null : first.box;
           } else {
             // Rebote pequeño contra pared/techo; nunca atraviesa el obstáculo.
             if (this.vy<0 && fromY>=first.box.y+first.box.h+r-0.01) this.vy=Math.abs(this.vy)*0.25;
@@ -4584,6 +4591,94 @@
         c.restore();
       }
     }
+    class KingPlatformChunk {
+      constructor(x,y) {
+        this.x=x;this.y=y;this.vx=0;this.vy=-1.5;this.radius=16;this.gravity=0.32;
+        this.state='FALLING';this.dead=false;this.age=0;this.angle=0;this.support=null;
+        this.damage=22;this.sourceType='GOBLIN_KING_CHUNK';this.damageType='projectile';this.runId=currentRunId;
+      }
+      static hitScene(x,y,nx,ny,r=16) {
+        let first=null;
+        for(const box of [...platforms,...obstacles.filter(o=>!o.broken),{x:-100,y:groundY,w:width+200,h:height+200}]){
+          const bounds={x:box.x-r,y:box.y-r,w:box.w+2*r,h:box.h+2*r};
+          // Un contacto tangente puede separarse del sólido al levantar el fragmento.
+          if((Math.abs(y-bounds.y)<0.001&&ny<y)||(Math.abs(y-bounds.y-bounds.h)<0.001&&ny>y)||
+            (Math.abs(x-bounds.x)<0.001&&nx<x)||(Math.abs(x-bounds.x-bounds.w)<0.001&&nx>x))continue;
+          const t=segmentBoxHit(x,y,nx,ny,bounds);
+          if(t!==null&&(!first||t<first.t))first={t,box};
+        }
+        return first;
+      }
+      shatter() {
+        if(this.dead)return;this.dead=true;
+        if(isRunFinished())return;
+        for(let i=0;i<9;i++)activeVisuals.push(new StoneDebris(this.x,this.y));
+        screenShake=Math.max(screenShake,this.state==='THROWN'?6:3);audio.playCrumble();
+      }
+      update(dt,king) {
+        if(this.dead)return;
+        if(this.runId!==currentRunId||isRunFinished()){this.dead=true;return;}
+        if(gameState!=='PLAYING')return;
+        if(![this.x,this.y,this.vx,this.vy].every(Number.isFinite)){this.dead=true;return;}
+        this.age+=dt;
+        if(this.age>12000){this.dead=true;return;}
+        if(this.state==='HELD'){
+          const hand=king.localToWorld(king.attackPose().hand);
+          if(KingPlatformChunk.hitScene(this.x,this.y,hand.x,hand.y,this.radius)){this.shatter();return;}
+          this.x=hand.x;this.y=hand.y;return;
+        }
+        if(this.state==='GRABBING')return;
+        if(this.state==='GROUND'){
+          if(this.support&&(!platforms.includes(this.support)&&!obstacles.includes(this.support)||this.support.bossBroken||this.support.broken)){
+            this.state='FALLING';this.support=null;
+          }else return;
+        }
+        const step=dt/FIXED_STEP_MS;this.vy+=this.gravity*step;
+        const nx=this.x+this.vx*step,ny=this.y+this.vy*step,r=this.radius;
+        const scene=KingPlatformChunk.hitScene(this.x,this.y,nx,ny,r);
+        const hitPlayer=this.state==='THROWN'?segmentBoxHit(this.x,this.y,nx,ny,
+          {x:player.x-12-r,y:player.y-55-r,w:24+2*r,h:55+2*r}):null;
+        if(hitPlayer!==null&&(!scene||hitPlayer<scene.t)){
+          this.x+=(nx-this.x)*hitPlayer;this.y+=(ny-this.y)*hitPlayer;
+          this.shatter(); // Marcar antes del daño: jamás hay dos impactos ni knockback mortal tardío.
+          const accepted=player.takeDamage(this.damage,this.sourceType);
+          if(accepted&&!isRunFinished()){
+            player.vx=(Math.sign(this.vx)||king.facing)*5;player.vy=-3.5;player.isGrounded=false;coyoteTimer=0;
+          }
+          return;
+        }
+        if(scene){
+          const oldY=this.y;this.x+=(nx-this.x)*Math.max(0,scene.t-0.001);this.y+=(ny-this.y)*Math.max(0,scene.t-0.001);
+          if(this.state==='THROWN'){this.shatter();return;}
+          if(this.vy>=0&&oldY<=scene.box.y-r+0.1){
+            this.y=scene.box.y-r;this.vx=this.vy=0;this.state='GROUND';
+            this.support=scene.box.y===groundY?null:scene.box;
+          }else this.shatter();
+        }else{this.x=nx;this.y=ny;}
+        this.angle+=this.vx*0.015*step;
+        if(this.x<-80||this.x>width+80||this.y>groundY+100)this.dead=true;
+      }
+      remapResize(ratioX,deltaY,king) {
+        this.x*=ratioX;this.y+=deltaY;this.vx*=ratioX;
+        if(this.state==='HELD'){
+          const hand=king.localToWorld(king.attackPose().hand);this.x=hand.x;this.y=hand.y;
+        }else if(this.state==='GROUND'){
+          if(this.support&&!this.support.bossBroken&&!this.support.broken){
+            this.x=kingClamp(this.x,this.support.x,this.support.x+this.support.w);this.y=this.support.y-this.radius;
+          }else{this.support=null;this.y=groundY-this.radius;}
+        }else if(KingPlatformChunk.hitScene(this.x,this.y,this.x,this.y))this.shatter();
+      }
+      draw(c) {
+        if(this.dead)return;
+        c.save();c.translate(this.x,this.y);c.rotate(this.angle);
+        c.fillStyle='#475569';c.strokeStyle='#b5b0a1';c.lineWidth=1.5;
+        c.beginPath();c.moveTo(-22,-9);c.lineTo(-10,-15);c.lineTo(19,-10);c.lineTo(23,5);
+        c.lineTo(9,14);c.lineTo(-18,10);c.closePath();c.fill();c.stroke();
+        c.strokeStyle='#17202b';c.beginPath();c.moveTo(-9,-11);c.lineTo(-3,-2);c.lineTo(7,3);c.lineTo(4,11);c.stroke();
+        c.restore();
+      }
+    }
+
     class GoblinKing {
       constructor(x, y, facing) {
         this.x=x; this.y=y; this.facing=facing || 1;
@@ -4611,6 +4706,15 @@
         this.lastNavigationAction='NONE';this.navigationFailureCount=0;this.blockedTimer=0;this.navigationRetryTimer=0;
         this.dropPlan=null;this.dropAtEdge=false;this.dropTargetX=x;this.targetKingObstacle=null;this.smashPhase='NONE';
         this.dropRecoveryLeap=false;
+        this.burstCooldown=0;this.burstRemaining=0;this.burstFacing=this.facing;
+        this.playerSpatial=null;this.navGraph=null;this.navRoute=[];this.navStep=0;this.navExpected=null;
+        this.navMode='IDLE';this.navReason='INITIAL';this.navReplans=0;this.navSnapshot=null;
+        this.navWatchTimer=0;this.navPlanTimer=0;
+        this.navFlightTarget=null;
+        this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;
+        this.navMetrics={cost:0,transitions:0,reversals:0,progress:0};this.navWhy='INITIAL';
+        this.targetKingPlatform=null;this.platformChunk=null;this.platformSearchCooldown=0;
+        this.chunkAim=null;this.chunkLocked=false;this.chunkGrabStart=null;
       }
       getHitboxes() {
         const s=this.scale;
@@ -4626,7 +4730,8 @@
         if(this.currentState==='KING_GUARD' && source && Number.isFinite(source.x) && Number.isFinite(source.y)) {
           const front=(source.x-this.x)*this.facing,vertical=source.y-(this.y-32*this.scale);
           if(front>0 && vertical>=-55 && Math.abs(vertical)<=front+45) {
-            amount*=source.damageType==='aoe'||rawAmount>=22 ? 0.8 : 0.6;
+            const strong=source.damageType==='aoe'||rawAmount>=22;
+            amount*=this.bossTraits.shieldbearer ? (strong?0.65:0.32) : (strong?0.8:0.6);
             amount=Math.round(amount*100)/100;this.blockFlash=140;
           }
         }
@@ -4634,7 +4739,7 @@
         audio.playHit();
         damageNumbers.push(new DamageNumber(this.x,this.y-58*this.scale,`-${amount}`,'#fff'));
         if(rawAmount>=18&&!this.isRoyalRitual())this.poise+=Math.min(35,rawAmount);
-        if(this.poise>=80 && !['KING_LEAP','KING_DROP'].includes(this.currentState) && !this.isRoyalRitual()){
+        if(this.poise>=(this.bossTraits.brute?108:80) && !['KING_LEAP','KING_DROP'].includes(this.currentState) && !this.isRoyalRitual()){
           this.poise=0;this.comboCount=0;this.waves=[];this.setState('KING_STAGGER',650);
         }
         if (this.hp===0) {
@@ -4652,12 +4757,15 @@
         if(this.isRoyalRitual() || this.devourThresholdIndex>=this.bossMaxDevours || this.dead)return;
         const pool=Object.keys(this.bossTraits).filter(type=>!this.bossTraits[type]);
         if(!pool.length)return;
+        this.clearEnvironment();
         this.tributeType=pool[Math.floor(Math.random()*pool.length)];
         this.devourThresholdIndex++; // Reserva el umbral una sola vez, incluso bajo daño continuo.
         this.waves=[];this.hitWindows.clear();this.comboCount=0;
         this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;
         this.vx=this.vy=this.flightVy=0;this.attackLocked=false;
         this.dropPlan=null;this.targetKingObstacle=null;this.smashPhase='NONE';
+        this.burstRemaining=0;
+        this.navPursuitLanding=false;this.navRoute=[];this.navExpected=this.navFlightTarget=null;
         this.royalPulse=false;this.tribute=null;this.ritualMotes=[];
         this.action='ROYAL_DEVOUR';this.setState('KING_DEVOUR_CALL',700);
       }
@@ -4804,8 +4912,9 @@
         if(part==='secondary')draw('shieldbearer',()=>{
           const [x,y]=pose.offHand;
           this.line(c,[[-12,-35],[x,y]],'#8d9188',10);
-          this.polygon(c,[[x-10,y-9],[x+2,y-17],[x+9,y-7],[x+7,y+7],[x+2,y+14],[x-1,y+8],[x-7,y+12],[x-9,y+2]],'#7e8580');
+          this.polygon(c,[[x-10,y-9],[x+2,y-17],[x+9,y-7],[x+7,y+7],[x+2,y+14],[x-1,y+8],[x-7,y+12],[x-9,y+2]],this.blockFlash>0?'#e9d8ad':'#7e8580');
           this.line(c,[[x-5,y-11],[x+2,y-6],[x,y+12]],'#d2c7ac',2);
+          if(this.blockFlash>0)this.line(c,[[x+10,y-6],[x+14,y-9],[x+12,y-12]],'#f5e2af',1);
         });
         if(part==='weapon')draw('warrior',()=>{
           this.polygon(c,[[-30,-53],[-19,-61],[-15,-54],[-22,-41],[-28,-44]],'#c7b9a2');
@@ -4873,19 +4982,22 @@
           (this.currentState==='KING_ATTACK_PREP'&&this.actionTimer>200) ||
           (this.currentState==='KING_LEAP_PREP'&&this.actionTimer>200);
         if(!allowed)return;
-        const desired=Math.sign(player.x-this.x)||this.facing;
+        const lookX=this.currentState==='KING_ADVANCE'?this.advanceTarget:
+          this.currentState==='KING_LEAP_PREP'&&this.navFlightTarget?this.kingLeapTargetX:player.x;
+        const desired=Math.sign(lookX-this.x)||this.facing;
         if(desired===this.facing){this.kingTurnTimer=0;this.turnTarget=desired;return;}
         if(this.turnTarget!==desired){this.turnTarget=desired;this.kingTurnTimer=280;}
         this.kingTurnTimer=Math.max(0,this.kingTurnTimer-dt);
         if(this.kingTurnTimer===0)this.facing=desired;
       }
-      planLeap(targetX,targetY,fromX=this.x) {
+      planLeap(targetX,targetY,fromX=this.x,exact=false) {
         const half=17*this.scale;
         const destinations=[];
         for(const surface of [{x:0,y:groundY,w:width,ground:true},...platforms]) {
           if(surface.w<2*half+4)continue;
           const x=kingClamp(targetX,surface.x+half+2,surface.x+surface.w-half-2);
           for(const candidate of [x,x-65,x+65,x-140,x+140]) {
+            if(exact&&(Math.abs(candidate-targetX)>0.1||Math.abs(surface.y-targetY)>0.1))continue;
             if(candidate<surface.x+half+2||candidate>surface.x+surface.w-half-2||!this.bodyClear(candidate,surface.y))continue;
             destinations.push({x:candidate,y:surface.y,surface,score:Math.abs(candidate-targetX)+Math.abs(surface.y-targetY)*1.6});
           }
@@ -4922,13 +5034,15 @@
       }
 
       navigationFailed(action) {
+        this.invalidateNavigation('FAILED_'+action,false);
         if(action==='DROP')this.dropPlan=null;
         if(action==='OBSTACLE_SMASH'){this.targetKingObstacle=null;this.smashPhase='NONE';}
         this.lastNavigationAction=action;this.navigationFailureCount++;
         this.navigationRetryTimer=Math.min(2400,700+this.navigationFailureCount*300);
+        this.navPlanTimer=this.navigationRetryTimer;
         this.setState('KING_IDLE',400);
       }
-      planDrop(targetX=player.x) {
+      planDrop(targetX=player.x,all=false) {
         const support=this.supportAt(this.x,this.y),half=17*this.scale;
         if(!support || support.ground)return null;
         const candidates=[];
@@ -4953,14 +5067,39 @@
           }
         }
         candidates.sort((a,b)=>a.score-b.score);
-        return candidates[0]||null;
+        return all?candidates:candidates[0]||null;
+      }
+      planChaseDrop(targetX,targetY,allowRun=true) {
+        // Navegación, sin daño de LAND: impulso bajo que sale físicamente de la plataforma.
+        const support=this.supportAt(this.x,this.y);
+        if(!support||support.ground||targetY<this.y+35||!this.supportAt(targetX,targetY)||!this.bodyClear(targetX,targetY))return null;
+        const dir=Math.sign(targetX-this.x)||this.navDirection||this.facing,half=17*this.scale;
+        const runX=kingClamp(this.x+dir*42,support.x+half+2,support.x+support.w-half-2);
+        for(const launchX of allowRun?[this.x,runX]:[this.x]){
+          if(this.sweepBody(this.x,this.y,launchX,this.y))continue;
+          for(const steps of [28,36,44,52,64,76]){
+            const vx=(targetX-launchX)/steps;
+            const vy=(targetY-this.y-this.gravity*steps*(steps+1)/2)/steps;
+            if(Math.abs(vx)>7||vy> -1||vy< -13)continue;
+            let x=launchX,y=this.y,v=vy,valid=true;
+            for(let i=1;i<=steps;i++){
+              const nx=x+vx,ny=y+(v+=this.gravity),hit=this.sweepBody(x,y,nx,ny);
+              if(hit&&!(i===steps&&hit.ny===-1&&hit.surface&&Math.abs(hit.surface.y-targetY)<0.2)){valid=false;break;}
+              if(!hit&&!this.bodyClear(nx,ny)){valid=false;break;}x=nx;y=ny;
+            }
+            if(valid)return {chase:true,edgeX:launchX,launchX,vx,vy,steps,x:targetX,y:targetY,dir:Math.sign(vx)||dir};
+          }
+        }
+        return null;
       }
       beginDrop(plan) {
+        this.navFlightTarget=this.navExpected;
         this.dropRecoveryLeap=false;
         this.dropPlan=plan;this.dropTargetX=player.x;this.dropAtEdge=false;
         this.lastNavigationAction='DROP';this.facing=plan.dir;this.action='DROP';
         this.vx=this.vy=this.flightVy=0;this.comboCount=0;
-        this.setState('KING_DROP_PREP',350);
+        this.navMode=plan.chase?'CHASE_DROP':'DROP';
+        this.navDirection=plan.dir;this.setState('KING_DROP_PREP',plan.chase?250:350);
       }
       updateDrop(step) {
         if(!this.dropPlan){this.navigationFailed('DROP');return;}
@@ -5044,35 +5183,428 @@
         audio.playSlam(strong?0.25:0.16);screenShake=Math.max(screenShake,strong?18:9);
         if(o.hp===0){o.broken=true;RunStats.pillarsDestroyed++;audio.playCrumble();}
       }
-      decideAction() {
-        const dx=player.x-this.x,dist=Math.abs(dx),dy=this.y-player.y;
-        const closing=dx*player.vx< -20;
-        const elevated=Math.abs(dy)>65;
-        const below=dy< -65;
-        if(below){
-          if(this.navigationRetryTimer>0){this.setState('KING_IDLE',350);return;}
-          const drop=this.planDrop();
-          if(drop){this.beginDrop(drop);return;}
-          this.blocked=true;
-          const obstruction=this.blockingPillar();
-          if(this.blockedTimer>=900&&this.canSmashPillar(obstruction)){this.beginObstacleSmash(obstruction);return;}
-          // No buscar una plataforma superior cuando el objetivo está debajo.
-          this.navigationFailed('DROP');return;
+
+      canBreakPlatform(p) {
+        if(!p||!platforms.includes(p)||p.bossBroken||p.bossBreakable!==true)return false;
+        const sx=this.x,sy=this.y-30*this.scale;
+        const x=kingClamp(sx,p.x,p.x+p.w),y=kingClamp(sy,p.y,p.y+p.h);
+        if(Math.hypot(x-sx,y-sy)>55*this.scale)return false;
+        return ![...platforms.filter(o=>o!==p),...obstacles.filter(o=>!o.broken)].some(o=>segmentBoxHit(sx,sy,x,y,o)!==null);
+      }
+      blockingPlatform() {
+        if(this.platformSearchCooldown>0)return null;
+        this.platformSearchCooldown=900;
+        const candidates=platforms.filter(p=>this.canBreakPlatform(p));
+        if(!candidates.length)return null;
+        const originalMetrics=this.navMetrics;
+        const baselineRoute=this.planNavigation();
+        const baselineProgress=this.navigationProgress(baselineRoute.at(-1)||this);
+        const alreadyClear=Math.abs(player.y-this.y)<65&&this.bodyClear(player.x,player.y)&&
+          !this.sweepBody(this.x,this.y,player.x,player.y);
+        this.navMetrics=originalMetrics;
+        if(alreadyClear)return null;
+        let best=null,bestScore=30;
+        for(const p of candidates){
+          const original=platforms,graph=this.navGraph,metrics=this.navMetrics;
+          try{
+            // Prueba contrafactual local; no quitar realmente soporte ni tocar entidades.
+            platforms=original.filter(o=>o!==p);this.navGraph=null;
+            let point={x:this.x,y:this.y},safe=true;
+            if(!this.supportAt(point.x,point.y)){
+              let vy=0,landed=false;
+              for(let i=0;i<180;i++){
+                const ny=point.y+(vy+=this.gravity),hit=this.sweepBody(point.x,point.y,point.x,ny);
+                if(hit){
+                  if(hit.ny===-1&&hit.surface&&this.supportAt(point.x,hit.surface.y)){point.y=hit.surface.y;landed=true;}
+                  break;
+                }
+                point.y=ny;
+              }
+              safe=landed&&this.bodyClear(point.x,point.y);
+            }
+            if(!safe)continue;
+            const route=this.navigationProbe(point,()=>this.planNavigation());
+            const end=route.at(-1)||point;
+            const improvement=baselineProgress-this.navigationProgress(end);
+            const clearGoal=this.navigationProbe(point,()=>Math.abs(player.y-this.y)<65&&
+              this.bodyClear(player.x,player.y)&&!this.sweepBody(this.x,this.y,player.x,player.y));
+            // La retirada debe mejorar la ruta existente, no solo dejar disponible una ruta que ya existía.
+            const score=improvement>20?improvement+(clearGoal?120:0)-Math.abs(p.x+p.w/2-this.x)*0.1:0;
+            if(score>bestScore){best=p;bestScore=score;}
+          }finally{platforms=original;this.navGraph=graph;this.navMetrics=metrics;}
         }
-        if(!elevated && dist>155 && !this.sweepBody(this.x,this.y,kingClamp(player.x,17*this.scale,width-17*this.scale),this.y)){
-          this.advanceTarget=player.x;this.setState('KING_ADVANCE',850);return;
+        return best;
+      }
+      beginPlatformBreak(p) {
+        if(!this.canBreakPlatform(p))return false;
+        this.targetKingPlatform=p;this.waves=[];this.comboCount=0;this.burstRemaining=0;
+        this.action='PLATFORM_BREAK';this.facing=Math.sign(p.x+p.w/2-this.x)||this.facing;
+        this.navWhy='BODY_CLEARANCE_BREAK_PLATFORM';this.navMode='PLATFORM_BREAK';
+        this.setState('KING_PLATFORM_BREAK_PREP',650);return true;
+      }
+      breakPlatformImpact() {
+        const p=this.targetKingPlatform;
+        if(!this.canBreakPlatform(p)){this.targetKingPlatform=null;this.invalidateNavigation('PLATFORM_OUT_OF_REACH',false);this.setState('KING_RECOVER',200);return;}
+        const strong=this.bossTraits.brute===1;
+        p.bossHits=(p.bossHits||0)+(strong?2:1);
+        const x=kingClamp(this.x,p.x+8,p.x+p.w-8),y=p.y;
+        for(let i=0;i<(strong?22:12);i++)activeVisuals.push(new StoneDebris(x,y));
+        audio.playSlam(strong?0.25:0.18);screenShake=Math.max(screenShake,strong?18:11);
+        if(p.bossHits<2){this.setState('KING_PLATFORM_BREAK_PREP',650);return;}
+        p.bossBroken=true;platforms=platforms.filter(o=>o!==p);
+        this.navGraph=null;this.invalidateNavigation('PLATFORM_REMOVED_REPLAN',false);this.navFlightTarget=null;
+        this.navWhy='PLATFORM_REMOVED_REPLAN';this.navRecentRegions=[];this.targetKingPlatform=null;
+        if(this.platformChunk)this.platformChunk.dead=true;
+        this.platformChunk=new KingPlatformChunk(x,y-18);
+        // Perder soporte no es un teleport: la física habitual deja caer a sus ocupantes.
+        for(const actor of [player,...duendes,this.tribute].filter(Boolean)){
+          if(Math.abs(actor.y-p.y)<2&&actor.x>=p.x-12&&actor.x<=p.x+p.w+12){
+            actor.isGrounded=false;if(actor===player)coyoteTimer=0;
+          }
         }
-        if(this.navigationRetryTimer<=0&&this.leapCooldown<=0&&this.leapSearchCooldown<=0&&(elevated||dist>310||this.blocked)) {
-          const tx=player.x+player.vx*8,ty=player.y;
-          const plan=this.planLeap(tx,ty);
-          if(plan){this.beginLeap(plan,elevated?(dy>0?'ELEVATED_PLAYER':'LOWER_PLAYER'):this.blocked?'REPOSITION':'DISTANT_PLAYER');return;}
-          const launch=this.findLaunchPosition(tx,ty);
-          if(launch!==null){this.advanceTarget=launch;this.setState('KING_ADVANCE',950);return;}
-          this.leapSearchCooldown=1000;
+        for(const corpse of goblinCorpses)if(Math.abs(corpse.y-p.y)<2&&corpse.x>=p.x&&corpse.x<=p.x+p.w)corpse.lostPlatformSupport=true;
+        if(!this.supportAt(this.x,this.y)){
+          this.dropPlan={chase:true,vx:0,x:this.x,y:groundY,edgeX:this.x,launchX:this.x};
+          this.dropAtEdge=true;this.flightVy=this.vx=this.vy=0;this.isGrounded=false;
+          this.dropRecoveryLeap=false;this.setState('KING_DROP');return;
         }
+        if(!this.beginChunkGrab())this.setState('KING_RECOVER',180);
+      }
+      chunkHoldPoint() { return {x:this.x+this.facing*24*this.scale,y:this.y-48*this.scale}; }
+      planChunkThrow(origin=this.chunkHoldPoint()) {
+        if(Math.abs(player.x-this.x)<200)return null;
+        const targetX=kingClamp(player.x+kingClamp(player.vx*8,-50,50),25,width-25),targetY=player.y-28;
+        for(const steps of [40,52,64,76]){
+          const vx=(targetX-origin.x)/steps,vy=(targetY-origin.y-0.32*steps*(steps+1)/2)/steps;
+          if(Math.abs(vx)>11||vy< -15||vy>6)continue;
+          let x=origin.x,y=origin.y,v=vy,valid=true;
+          for(let i=0;i<steps;i++){
+            const nx=x+vx,ny=y+(v+=0.32);
+            if(KingPlatformChunk.hitScene(x,y,nx,ny)){valid=false;break;}x=nx;y=ny;
+          }
+          if(valid)return {vx,vy,targetX,targetY};
+        }
+        return null;
+      }
+      beginChunkGrab() {
+        const chunk=this.platformChunk,hand=this.chunkHoldPoint();
+        if(!chunk||chunk.dead||!['FALLING','GROUND'].includes(chunk.state)||!this.supportAt(this.x,this.y)||
+          Math.hypot(chunk.x-this.x,chunk.y-(this.y-30*this.scale))>55*this.scale||
+          KingPlatformChunk.hitScene(chunk.x,chunk.y,hand.x,hand.y)||!this.planChunkThrow(hand))return false;
+        this.chunkGrabStart={x:chunk.x,y:chunk.y};chunk.state='GRABBING';chunk.vx=chunk.vy=0;
+        this.chunkAim=null;this.chunkLocked=false;this.action='CHUNK_THROW';this.navWhy='CHUNK_THROW_OPPORTUNITY';
+        this.setState('KING_CHUNK_GRAB',850);return true;
+      }
+      abandonChunk() {
+        if(this.platformChunk&&!this.platformChunk.dead&&['HELD','GRABBING'].includes(this.platformChunk.state)){
+          this.platformChunk.state='FALLING';this.platformChunk.vx=this.platformChunk.vy=0;
+        }
+        this.chunkAim=null;this.chunkGrabStart=null;this.chunkLocked=false;this.setState('KING_RECOVER',180);
+      }
+      updateEnvironment(dt) {
+        const chunk=this.platformChunk;
+        if(this.targetKingPlatform&&!this.currentState.startsWith('KING_PLATFORM_BREAK'))this.targetKingPlatform=null;
+        if(chunk&&['HELD','GRABBING'].includes(chunk.state)&&!this.currentState.startsWith('KING_CHUNK')){
+          chunk.state='FALLING';chunk.vx=chunk.vy=0;this.chunkAim=this.chunkGrabStart=null;this.chunkLocked=false;
+        }
+        if(chunk){chunk.update(dt,this);if(chunk.dead)this.platformChunk=null;if(isRunFinished())return true;}
+        if(this.currentState==='KING_PLATFORM_BREAK_PREP'){
+          if(!this.canBreakPlatform(this.targetKingPlatform)){this.targetKingPlatform=null;this.setState('KING_RECOVER',180);return true;}
+          if(Math.floor((this.actionTimer+dt)/160)!==Math.floor(this.actionTimer/160)){
+            const p=this.targetKingPlatform;activeVisuals.push(new StoneDebris(kingClamp(this.x,p.x,p.x+p.w),p.y+p.h));
+          }
+          if(this.actionTimer===0)this.setState('KING_PLATFORM_BREAK',180);
+          return true;
+        }
+        if(this.currentState==='KING_PLATFORM_BREAK'){
+          if(this.actionTimer===0)this.breakPlatformImpact();return true;
+        }
+        if(this.currentState==='KING_CHUNK_GRAB'){
+          if(!chunk||chunk.dead||Math.abs(player.x-this.x)<170){this.abandonChunk();return true;}
+          const hand=this.localToWorld(this.attackPose().hand);
+          const x=hand.x,y=hand.y;
+          if(KingPlatformChunk.hitScene(chunk.x,chunk.y,x,y)){chunk.shatter();this.abandonChunk();return true;}
+          chunk.x=x;chunk.y=y;
+          if(this.actionTimer===0){chunk.state='HELD';this.chunkLocked=false;this.setState('KING_CHUNK_THROW_PREP',650);}
+          return true;
+        }
+        if(this.currentState==='KING_CHUNK_THROW_PREP'){
+          if(!chunk||chunk.dead){this.abandonChunk();return true;}
+          if(!this.chunkLocked){
+            this.chunkAim=this.planChunkThrow(this.localToWorld(this.attackPose().hand));
+            if(this.actionTimer<=200)this.chunkLocked=true;
+          }
+          if(!this.chunkAim){this.abandonChunk();return true;}
+          if(this.actionTimer===0){
+            chunk.state='THROWN';chunk.vx=this.chunkAim.vx;chunk.vy=this.chunkAim.vy;
+            this.setState('KING_CHUNK_THROW',240);audio.playSword(120);screenShake=Math.max(screenShake,5);
+          }
+          return true;
+        }
+        if(this.currentState==='KING_CHUNK_THROW'){
+          if(this.actionTimer===0){this.chunkAim=null;this.chunkGrabStart=null;this.setState('KING_RECOVER',350);}return true;
+        }
+        return false;
+      }
+      drawEnvironment(c) {
+        if(this.platformChunk)this.platformChunk.draw(c);
+      }
+      clearEnvironment() {
+        if(this.platformChunk)this.platformChunk.dead=true;
+        this.platformChunk=this.targetKingPlatform=this.chunkAim=this.chunkGrabStart=null;
+        this.platformSearchCooldown=0;this.chunkLocked=false;
+      }
+
+      spatialRegion(x,y) {
+        const surfaces=[{x:0,y:groundY,w:width,key:'GROUND'},...platforms.map((p,i)=>({...p,key:'P'+i}))];
+        const under=surfaces.filter(p=>x>=p.x&&x<=p.x+p.w&&p.y>=y-12).sort((a,b)=>a.y-b.y)[0];
+        return under ? (Math.abs(y-under.y)<=12?'':'AIR→')+under.key : 'AIR';
+      }
+      invalidateNavigation(reason,interrupt=true) {
+        this.navRoute=[];this.navStep=0;this.navExpected=null;this.navReason=reason;
+        this.navReplans++;this.navPlanTimer=0;
+        if(reason==='PLAYER_REGION_CHANGED'||reason==='PLAYER_MOVED')this.navRecentRegions=[];
+        // Nunca corregir una trayectoria ya lanzada ni cancelar telegraphs de combate.
+        const safe=['KING_IDLE','KING_ADVANCE','KING_BURST_PREP'].includes(this.currentState) ||
+          ['KING_LEAP_PREP','KING_DROP_PREP'].includes(this.currentState)&&this.actionTimer>200;
+        if(interrupt&&safe){this.navFlightTarget=null;this.burstRemaining=0;this.setState('KING_IDLE',0);}
+      }
+      perceivePlayer(dt) {
+        const region=this.spatialRegion(player.x,player.y);
+        this.playerSpatial={x:player.x,y:player.y,predictedX:kingClamp(player.x+kingClamp(player.vx*14,-70,70),17*this.scale,width-17*this.scale),dx:player.x-this.x,dy:player.y-this.y,region,
+          vertical:player.y-this.y>65?'BELOW':this.y-player.y>65?'ABOVE':'LEVEL',
+          line:![...platforms,...obstacles.filter(o=>!o.broken)].some(o=>
+            segmentBoxHit(this.x,this.y-35*this.scale,player.x,player.y-25,o)!==null)};
+        this.navWatchTimer=Math.max(0,this.navWatchTimer-dt);
+        this.navPlanTimer=Math.max(0,this.navPlanTimer-dt);
+        this.navRecentRegions=this.navRecentRegions.filter(r=>simulationTime-r.time<5000);
+        if(this.navWatchTimer===0){
+          this.navWatchTimer=300;
+          if(this.navSnapshot && (region!==this.navSnapshot.region ||
+            Math.abs(player.x-this.navSnapshot.x)>100 || Math.abs(player.y-this.navSnapshot.y)>70)){
+            this.invalidateNavigation(region!==this.navSnapshot.region?'PLAYER_REGION_CHANGED':'PLAYER_MOVED');
+            this.navSnapshot={x:player.x,y:player.y,region};
+          }
+        }
+      }
+      navigationProbe(point,fn) {
+        const x=this.x,y=this.y;
+        this.x=point.x;this.y=point.y;
+        try{return fn();}finally{this.x=x;this.y=y;}
+      }
+      navigationGraph() {
+        const signature=JSON.stringify([width,groundY,platforms,obstacles.map(o=>[o.x,o.y,o.w,o.h,o.broken])]);
+        if(this.navGraph?.signature===signature)return this.navGraph;
+        if(this.navGraph)this.invalidateNavigation('GEOMETRY_CHANGED',false);
+        const regions=[],nodes=[],half=17*this.scale;
+        const surfaces=[{x:0,y:groundY,w:width,key:'GROUND'},...platforms.map((p,i)=>({...p,key:'P'+i}))];
+        for(const surface of surfaces){
+          let start=null,last=null;
+          const end=surface.x+surface.w-half-2;
+          const close=()=>{
+            if(start!==null){
+              const region={id:regions.length,key:surface.key,x0:start,x1:last,y:surface.y};
+              regions.push(region);
+              for(const x of [...new Set([start,(start+last)/2,last])])
+                nodes.push({x,y:surface.y,region:region.id});
+            }
+            start=last=null;
+          };
+          for(let x=surface.x+half+2;x<=end+0.01;x+=16){
+            if(this.bodyClear(x,surface.y)){if(start===null)start=x;last=x;}else close();
+          }
+          close();
+        }
+        this.navGraph={signature,regions,nodes,edges:new Map(),connections:new Map()};
+        return this.navGraph;
+      }
+      navigationRegion(point,graph=this.navigationGraph()) {
+        return graph.regions.find(r=>Math.abs(r.y-point.y)<2&&point.x>=r.x0-16&&point.x<=r.x1+16);
+      }
+      navigationEdges(from,nodes,graph) {
+        const key=from.x.toFixed(1)+','+from.y.toFixed(1);
+        const cached=graph.edges.get(key);
+        if(cached)return cached;
+        const edges=[];
+        const geometry=(kind,to,compute)=>{
+          const id=kind+':'+key+'>'+to.x.toFixed(1)+','+to.y.toFixed(1);
+          if(graph.connections.has(id))return graph.connections.get(id);
+          const value=compute();graph.connections.set(id,value);return value;
+        };
+        this.navigationProbe(from,()=>{
+          for(let i=0;i<nodes.length;i++){
+            const to=nodes[i],distance=Math.abs(to.x-from.x);
+            if(distance<2&&Math.abs(to.y-from.y)<2)continue;
+            if(from.region===to.region){
+              if(!this.sweepBody(from.x,from.y,to.x,to.y))
+                edges.push({mode:'WALK',to:i,x:to.x,y:to.y,region:to.region,cost:distance/1.65});
+            }else{
+              const chase=geometry('CHASE',to,()=>this.planChaseDrop(to.x,to.y));
+              if(chase)edges.push({mode:'CHASE_DROP',to:i,x:to.x,y:to.y,region:to.region,
+                cost:chase.steps+15+Math.abs(chase.launchX-from.x)/3.2});
+              const leap=geometry('LEAP',to,()=>this.planLeap(to.x,to.y,from.x,true));
+              if(leap)edges.push({mode:'LEAP',to:i,x:leap.x,y:leap.y,region:to.region,
+                cost:leap.steps+110+Math.abs(to.y-from.y)*0.05});
+            }
+          }
+          for(const drop of geometry('DROP',from,()=>this.planDrop(player.x,true))||[]){
+            const region=this.navigationRegion(drop,graph);
+            if(!region)continue;
+            let index=-1,best=Infinity;
+            nodes.forEach((n,i)=>{if(n.region===region.id&&Math.abs(n.x-drop.x)<best){index=i;best=Math.abs(n.x-drop.x);}});
+            if(index>=0)edges.push({mode:'DROP',to:index,x:drop.x,y:drop.y,region:region.id,
+              cost:Math.abs(drop.edgeX-from.x)/2.4+Math.sqrt(2*(drop.y-from.y)/this.gravity)+65+best/1.65});
+          }
+        });
+        graph.edges.set(key,edges);
+        return edges;
+      }
+      navigationProgress(point) {
+        return Math.max(0,Math.abs(point.x-player.x)-100)/1.65+Math.abs(point.y-player.y)*0.9;
+      }
+      navigationPenalty(from,edge,direction) {
+        const vertical=player.y-from.y,travel=edge.y-from.y;
+        const away=Math.max(0,Math.abs(edge.x-player.x)-Math.abs(from.x-player.x));
+        const dir=Math.abs(edge.x-from.x)>12?Math.sign(edge.x-from.x):direction;
+        const transition=edge.region!==from.region;
+        const progress=this.navigationProgress(from)-this.navigationProgress(edge);
+        return (transition?190:0)+(edge.mode==='WALK'?0:100)+
+          (Math.abs(vertical)>65&&travel*vertical<0?260+Math.abs(travel)*4:0)+away*1.2+
+          (dir&&direction&&dir!==direction?130:0)+
+          (transition&&this.navRecentRegions.some(r=>r.key===this.navGraph.regions[edge.region]?.key)?320:0)+
+          (progress<=0?65-progress*0.6:0);
+      }
+      planNavigation() {
+        const graph=this.navigationGraph(),region=this.navigationRegion(this,graph);
+        if(!region)return [];
+        if(graph.connections.size>6000)graph.connections.clear();
+        const predicted=this.playerSpatial?.predictedX??player.x;
+        // Puntos tácticos por destino actual: no convertir cada extremo en parada obligatoria.
+        const nodes=graph.nodes.map(n=>({...n}));
+        for(const r of graph.regions)for(const x of [kingClamp(predicted,r.x0,r.x1),kingClamp(this.x,r.x0,r.x1),
+          kingClamp(this.x+kingClamp(predicted-this.x,-520,520),r.x0,r.x1)]){
+          if(!nodes.some(n=>n.region===r.id&&Math.abs(n.x-x)<12))nodes.push({x,y:r.y,region:r.id});
+        }
+        const playerSurface=platforms.find(p=>player.x>=p.x&&player.x<=p.x+p.w&&Math.abs(p.y-player.y)<20);
+        if(playerSurface)for(const r of graph.regions.filter(r=>r.y>playerSurface.y+35))
+          for(const x of [playerSurface.x-17*this.scale-8,playerSurface.x+playerSurface.w+17*this.scale+8])
+            if(x>=r.x0&&x<=r.x1&&!nodes.some(n=>n.region===r.id&&Math.abs(n.x-x)<12))nodes.push({x,y:r.y,region:r.id});
+        graph.edges.clear(); // Los destinos tácticos cambian; la geometría/regiones se conservan.
+        const start={x:this.x,y:this.y,region:region.id};
+        const open=[{point:start,cost:0,path:[],direction:this.navDirection}],bestCost=new Map();
+        let best=null,expanded=0;
+        const finish=node=>{
+          const route=node.path;let direction=this.navDirection,reversals=0,previous=start;
+          for(const e of route){const d=Math.abs(e.x-previous.x)>12?Math.sign(e.x-previous.x):direction;
+            if(direction&&d!==direction)reversals++;direction=d;previous=e;}
+          this.navMetrics={cost:node.cost,transitions:route.filter(e=>e.mode!=='WALK').length,reversals,
+            progress:this.navigationProgress(start)-this.navigationProgress(node.point)};
+          return route;
+        };
+        // Coste de aterrizaje/transición alto; no revisitar regiones dentro del mismo plan.
+        while(open.length&&expanded++<32){
+          open.sort((a,b)=>a.cost+this.navigationProgress(a.point)-b.cost-this.navigationProgress(b.point));
+          const node=open.shift();
+          if(node.path.length&&(!best||this.navigationProgress(node.point)<this.navigationProgress(best.point)))best=node;
+          if(node.path.length&&Math.abs(node.point.y-player.y)<60&&Math.abs(node.point.x-predicted)<140)return finish(node);
+          if(node.path.length>=5)continue;
+          for(const edge of this.navigationEdges(node.point,nodes,graph)){
+            if(edge.region!==node.point.region&&(edge.region===start.region||node.path.some(e=>e.region===edge.region)))continue;
+            const wait=edge.mode==='LEAP'?Math.max(0,(node.path.some(e=>e.mode==='LEAP')?390:this.leapCooldown/FIXED_STEP_MS)-node.cost):0;
+            const cost=node.cost+edge.cost+wait+this.navigationPenalty(node.point,edge,node.direction);
+            const direction=Math.abs(edge.x-node.point.x)>12?Math.sign(edge.x-node.point.x):node.direction;
+            const key=edge.to+':'+direction;
+            if(cost>=(bestCost.get(key)??Infinity))continue;
+            bestCost.set(key,cost);
+            open.push({point:{x:edge.x,y:edge.y,region:edge.region},cost,direction,path:[...node.path,edge]});
+          }
+        }
+        if(best&&this.navigationProgress(best.point)<this.navigationProgress(start)-15)return finish(best);
+        this.navMetrics={cost:0,transitions:0,reversals:0,progress:0};return [];
+      }
+      navigationWalk(x) {
+        this.navSnapshot={x:player.x,y:player.y,region:this.playerSpatial.region};
+        const dir=Math.sign(x-this.x),distance=Math.abs(x-this.x);
+        if(this.bossTraits.scout&&distance>=100&&this.burstCooldown===0&&!this.kingActionHistory.slice(-2).includes('BURST')){
+        const burst=Math.min(210,distance);
+          if(this.supportAt(this.x+dir*burst,this.y)&&!this.sweepBody(this.x,this.y,this.x+dir*burst,this.y)){
+            this.burstFacing=this.facing=dir;this.burstRemaining=burst;this.burstCooldown=4300;
+            this.rememberAction('BURST');this.action='BURST';this.comboCount=0;
+            this.navMode='BURST';this.setState('KING_BURST_PREP',240);return;
+          }
+        }
+        this.navDirection=dir||this.navDirection;
+        this.advanceTarget=x;this.navMode='WALK';this.setState('KING_ADVANCE',850);
+      }
+      navigateToPlayer() {
+        const p=this.playerSpatial,graph=this.navigationGraph();
+        const current=this.navigationRegion(this,graph);
+        const strikeLine=![...platforms,...obstacles.filter(o=>!o.broken)].some(o=>
+          segmentBoxHit(this.x,this.y-25,player.x,player.y-25,o)!==null);
+        if(Math.abs(p.dy)<65&&Math.abs(p.dx)<155&&strikeLine){
+          this.navMode='COMBAT';return false;
+        }
+        if(current && Math.abs(p.dy)<65 && player.x>=current.x0&&player.x<=current.x1){
+          if(Math.abs(p.dx)>650&&this.leapCooldown===0&&(!this.bossTraits.scout||this.burstCooldown>0)){
+            const x=kingClamp(this.x+Math.sign(p.dx)*Math.min(640,Math.abs(p.predictedX-this.x)-100),current.x0,current.x1);
+            const leap=this.planLeap(x,current.y,this.x,true);
+            if(leap){
+              const edge={mode:'LEAP',x,y:current.y,region:current.id,cost:leap.steps+110};
+              this.navRoute=[edge];this.navStep=0;this.navExpected=edge;
+              this.navSnapshot={x:player.x,y:player.y,region:p.region};this.navWhy='RUNNING_LEAP_INTERCEPT';this.navMode='LEAP';
+              this.navMetrics={cost:edge.cost,transitions:1,reversals:0,progress:this.navigationProgress(this)-this.navigationProgress(edge)};
+              this.beginLeap(leap,'LONG_PURSUIT');return true;
+            }
+          }
+          this.navExpected=null;this.navWhy='DIRECT_PURSUIT';this.navigationWalk(player.x-Math.sign(p.dx)*85);return true;
+        }
+        if(this.navPlanTimer>0&&!this.navRoute.length){this.setState('KING_IDLE',Math.min(100,this.navPlanTimer));return true;}
+        if(!this.navRoute.length || this.navStep>=this.navRoute.length){
+          this.navRoute=this.planNavigation();this.navStep=0;this.navPlanTimer=this.navRoute.length?0:400;
+          this.navSnapshot={x:player.x,y:player.y,region:p.region};
+          this.navReplans++;this.navMode=this.navRoute.length?'ROUTE':'NO_ROUTE';
+        }
+        const edge=this.navRoute[this.navStep];
+        if(edge){
+          this.navExpected=edge;
+          const skipped=graph.regions.some(r=>r.y>Math.min(this.y,edge.y)+2&&r.y<Math.max(this.y,edge.y)-2);
+          this.navWhy=edge.mode==='CHASE_DROP'?(skipped?'SKIP_LEVEL_SAFE_ARC':'CHASE_DROP_PLAYER_BELOW_'+(edge.x<this.x?'LEFT':'RIGHT')):
+            edge.mode==='LEAP'?'RUNNING_LEAP_INTERCEPT':edge.mode==='WALK'?'APPROACH_LAUNCH_OR_PLAYER':'ONLY_SAFE_EDGE_ROUTE';
+          if(edge.mode==='WALK'){
+            if(Math.abs(this.x-edge.x)<5){this.navStep++;this.navExpected=null;this.setState('KING_IDLE',0);}
+            else this.navigationWalk(edge.x);
+            return true;
+          }
+          if(edge.mode==='CHASE_DROP'){
+            const plan=this.planChaseDrop(edge.x,edge.y);
+            if(plan){this.beginDrop(plan);return true;}
+          }else if(edge.mode==='DROP'){
+            const drop=(this.planDrop(player.x,true)||[]).filter(d=>this.navigationRegion(d,graph)?.id===edge.region)
+              .sort((a,b)=>Math.abs(a.x-edge.x)-Math.abs(b.x-edge.x))[0];
+            if(drop){this.navMode='DROP';this.beginDrop(drop);return true;}
+          }else if(this.leapCooldown<=0){
+            const leap=this.planLeap(edge.x,edge.y,this.x,true);
+            if(leap){this.navMode='LEAP';this.beginLeap(leap,edge.y>this.y?'DESCENDING_ROUTE':'PLATFORM_ROUTE');return true;}
+          }else{
+            const approach=current?kingClamp(edge.x,current.x0,current.x1):this.x;
+            if(Math.abs(approach-this.x)>100&&!this.sweepBody(this.x,this.y,approach,this.y)&&this.planLeap(edge.x,edge.y,approach,true)){
+              this.navWhy='APPROACH_DURING_LEAP_COOLDOWN';this.navigationWalk(approach);return true;
+            }
+            this.navMode='WAIT_LEAP_CD';this.setState('KING_IDLE',100);return true;
+          }
+          this.invalidateNavigation('CONNECTION_BLOCKED',false);this.setState('KING_IDLE',300);return true;
+        }
+        this.blocked=true;
         const pillar=this.blockingPillar();
-        if(this.blockedTimer>=900 && this.canSmashPillar(pillar) && !this.planLeap(player.x,player.y) &&
-          this.findLaunchPosition(player.x,player.y)===null){this.beginObstacleSmash(pillar);return;}
+        if(this.blockedTimer>=900&&this.canSmashPillar(pillar)){this.navMode='SMASH';this.beginObstacleSmash(pillar);return true;}
+        if(this.blockedTimer>=1000){const platform=this.blockingPlatform();if(platform&&this.beginPlatformBreak(platform))return true;}
+        this.navReason='NO_SAFE_CONNECTION';this.navWhy='BODY_CLEARANCE_LIMIT';this.setState('KING_IDLE',500);return true;
+      }
+      decideAction() {
+        this.perceivePlayer(0);
+        const dx=player.x-this.x,dist=Math.abs(dx),dy=this.y-player.y;
+        const closing=dx*player.vx< -20,elevated=Math.abs(dy)>65;
+        if(this.navigateToPlayer())return;
         if(!elevated&&dist<155) {
           if(closing&&this.guardCooldown<=0&&this.lastKingAction!=='GUARD'){
             this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;
@@ -5087,9 +5619,10 @@
         this.action=action;this.attackLocked=false;this.attackAimY=player.y-25;
         this.attackSerial++;this.hitWindows.clear();
         this.rememberAction(action);
-        this.setState('KING_ATTACK_PREP',action==='GROUND_CRUSH'?750:action==='WEAPON_SWEEP'?600:650);
+        this.setState('KING_ATTACK_PREP',action==='GROUND_CRUSH'?750:action==='WEAPON_SWEEP'?600:this.bossTraits.brute?760:650);
       }
       beginLeap(plan,reason) {
+        this.navFlightTarget=this.navExpected;
         this.lastNavigationAction='LEAP';
         this.action='LEAP';this.leapPlan=plan;this.leapReason=reason;
         this.kingLeapTargetX=plan.x;this.kingLeapTargetY=plan.y;this.leapLocked=false;
@@ -5098,8 +5631,8 @@
       }
       launchLeap() {
         // Revalidar la trayectoria completa antes de despegar; ningún destino atraviesa sólidos.
-        const plan=this.planLeap(this.kingLeapTargetX,this.kingLeapTargetY);
-        if(!plan){this.navigationFailureCount++;this.navigationRetryTimer=1200;this.setState('KING_RECOVER',500);this.leapCooldown=1200;return;}
+        const plan=this.planLeap(this.kingLeapTargetX,this.kingLeapTargetY,this.x,!!this.navFlightTarget);
+        if(!plan){this.navigationFailureCount++;this.navigationRetryTimer=1200;this.invalidateNavigation('LEAP_REVALIDATION_FAILED',false);this.navFlightTarget=null;this.navPlanTimer=1200;this.setState('KING_RECOVER',500);this.leapCooldown=1200;return;}
         this.leapPlan=plan;this.kingLeapTargetX=plan.x;this.kingLeapTargetY=plan.y;
         this.leapLocked=true;this.leapStep=0;this.vx=0;this.vy=plan.vy;
         this.airSlideDirection=0;this.airSlideBounces=0;this.flightVy=plan.vy;this.isGrounded=false;this.leapCooldown=6500;this.attackSerial++;this.hitWindows.clear();
@@ -5111,11 +5644,28 @@
         screenShake=Math.max(screenShake,shake);audio.playSlam(volume);
       }
       land() {
-        const dropping=this.currentState==='KING_DROP'||this.dropRecoveryLeap;
+        const landingDirection=Math.sign(this.vx)||this.navDirection;
+        // Un aterrizaje de tránsito lejano no es un ataque: conservar recuperación ofensiva cerca del jugador.
+        const transitLanding=!!this.navFlightTarget&&Math.hypot(player.x-this.x,player.y-this.y)>185;
+        if(this.navFlightTarget||this.navExpected){
+          const expected=this.navFlightTarget||this.navExpected;
+          const region=this.navigationRegion(this);
+          this.navReason=region?.id===expected.region?'WAYPOINT_REACHED':'UNEXPECTED_LANDING';
+          if(this.navReason==='WAYPOINT_REACHED'){
+            if(this.navRoute[this.navStep]===expected)this.navStep++;
+          }else this.invalidateNavigation('UNEXPECTED_LANDING',false);
+          this.navExpected=null;
+        }
+        const landedRegion=this.navigationRegion(this);
+        if(landedRegion){this.navRecentRegions.push({key:landedRegion.key,time:simulationTime});if(this.navRecentRegions.length>6)this.navRecentRegions.shift();}
+        this.navDirection=landingDirection;
+        this.navFlightTarget=null;
+        const dropping=this.currentState==='KING_DROP'||this.dropRecoveryLeap||transitLanding;
+        this.navPursuitLanding=transitLanding||dropping&&!!this.dropPlan?.chase;
         this.dropRecoveryLeap=false;
         this.vx=this.vy=this.flightVy=0;this.airSlideDirection=0;this.airSlideBounces=0;this.isGrounded=true;this.leapPlan=null;
         this.blocked=false;this.blockedTimer=0;this.navigationFailureCount=0;
-        if(dropping){this.dropPlan=null;this.setState('KING_DROP_LAND',150);this.impactDust(12,8,0.12);return;}
+        if(dropping){this.dropPlan=null;this.setState('KING_DROP_LAND',this.navPursuitLanding?80:150);this.impactDust(12,8,0.12);return;}
         this.setState('KING_LAND',180);this.impactDust(28,21,0.22);
         this.waves.push({x:this.x,y:this.y,range:100,age:0,duration:320,damage:22,serial:this.attackSerial,both:true});
       }
@@ -5131,7 +5681,7 @@
         this.hitWindows.add(serial);
         const accepted=player.takeDamage(damage,'GOBLIN_KING');
         if(accepted&&!isRunFinished()){
-          player.vx=(Math.sign(player.x-this.x)||this.facing)*(damage===26?7:4.5);
+          player.vx=(Math.sign(player.x-this.x)||this.facing)*(damage===32?8.5:damage===26?7:4.5);
           player.vy=-4;player.isGrounded=false;coyoteTimer=0;
         }
         return accepted;
@@ -5143,13 +5693,34 @@
         const swing=active?kingEase(1-this.actionTimer/this.actionDuration):this.currentState==='KING_RECOVER'?1:0;
         const mix=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
         const pose={hand:[30,-7],elbow:[26,-25],offHand:[-27,-31],weaponAngle:0,lean:0,crouch:0};
+        if(['KING_PLATFORM_BREAK_PREP','KING_PLATFORM_BREAK'].includes(this.currentState)&&this.targetKingPlatform){
+          const platform=this.targetKingPlatform;
+          const end=[(kingClamp(this.x,platform.x,platform.x+platform.w)-this.x)/this.scale*this.facing,
+            (kingClamp(this.y-30*this.scale,platform.y,platform.y+platform.h)-this.y)/this.scale];
+          const load=this.currentState==='KING_PLATFORM_BREAK_PREP'?kingEase(1-this.actionTimer/650):1;
+          const swing=this.currentState==='KING_PLATFORM_BREAK'?kingEase(1-this.actionTimer/180):0;
+          pose.hand=mix([30,-7],mix([-2,-55],end,swing),load);pose.elbow=mix([26,-25],[12,-38],load);
+          pose.crouch=3*load;pose.lean=0;return pose;
+        }
+        if(this.currentState==='KING_CHUNK_GRAB'&&this.chunkGrabStart){
+          const from=[(this.chunkGrabStart.x-this.x)/this.scale*this.facing,(this.chunkGrabStart.y-this.y)/this.scale];
+          pose.hand=mix(from,[24,-48],kingEase(1-this.actionTimer/850));pose.elbow=[22,-30];return pose;
+        }
+        if(this.currentState==='KING_CHUNK_THROW_PREP'){
+          const load=kingEase(1-Math.max(200,this.actionTimer)/650);
+          pose.hand=[24-8*load,-48-7*load];pose.elbow=[14,-36];pose.weaponAngle=-0.2;return pose;
+        }
+        if(this.currentState==='KING_CHUNK_THROW'){
+          const load=kingEase(1-200/650),start=[24-8*load,-48-7*load];
+          pose.hand=mix(start,[45,-20],kingEase(1-this.actionTimer/240));pose.elbow=[24,-30];return pose;
+        }
         if(this.isRoyalRitual()){
           pose.hand=[18,-39];pose.elbow=[26,-29];pose.offHand=[-17,-34];
           pose.crouch=this.currentState==='KING_DEVOUR_CALL'?3*Math.sin((1-this.actionTimer/700)*Math.PI):2;
           if(this.currentState==='KING_DEVOUR_TRANSFORM')pose.lean=Math.sin(this.poseTime*0.071)*0.025;
           return pose;
         }
-        if(this.currentState==='KING_GUARD'){pose.hand=[12,-44];pose.elbow=[23,-29];pose.offHand=[-8,-36];pose.weaponAngle=-0.35;pose.crouch=2;return pose;}
+        if(this.currentState==='KING_GUARD'){pose.hand=[12,-44];pose.elbow=[23,-29];pose.offHand=this.bossTraits.shieldbearer?[8-this.blockFlash/100,-39]:[-8,-36];pose.weaponAngle=-0.35;pose.crouch=2;return pose;}
         if(prep||active||this.currentState==='KING_RECOVER') {
           if(this.action==='HEAVY_FIST'||this.action==='OBSTACLE_SMASH'){
             const endY=kingClamp((this.attackAimY-this.y)/this.scale,-34,-9);
@@ -5165,9 +5736,11 @@
             pose.elbow=mix([26,-25],mix([3,-49],[25,-22],swing),p);
           }
         }
-        if(this.currentState==='KING_DROP_PREP'){
-          pose.crouch=4*kingEase(1-this.actionTimer/350);pose.hand=[24,-pose.crouch-7];pose.elbow=[20,-23];pose.lean=0.035;
-        }else if(this.currentState==='KING_DROP'){pose.hand=[23,-22];pose.elbow=[22,-32];pose.lean=0.04;}
+        if(this.currentState==='KING_BURST_PREP'){pose.crouch=4*kingEase(1-this.actionTimer/240);pose.lean=-0.09;pose.hand=[24,-20];}
+        else if(this.currentState==='KING_BURST'){pose.crouch=2;pose.lean=0.16;pose.weaponAngle=-0.2;}
+        else if(this.currentState==='KING_DROP_PREP'){
+          pose.crouch=4*kingEase(1-this.actionTimer/this.actionDuration);pose.hand=[24,-pose.crouch-7];pose.elbow=[20,-23];pose.lean=this.dropPlan?.chase?0.07:0.035;
+        }else if(this.currentState==='KING_DROP'){pose.hand=[23,-22];pose.elbow=[22,-32];pose.lean=this.dropPlan?.chase?Math.min(0.14,Math.abs(this.vx)*0.025):0.04;}
         else if(this.currentState==='KING_LEAP_PREP'){
           const load=kingEase(1-this.actionTimer/650);pose.crouch=7*load;pose.hand=[24,-pose.crouch-6];pose.elbow=[20,-18];pose.weaponAngle=-0.35*load;
         }else if(this.currentState==='KING_LEAP'){pose.crouch=-2*(1-kingEase(this.leapStep/10));pose.hand=[17,-53];pose.elbow=[24,-37];pose.weaponAngle=-0.45;pose.lean=kingClamp(this.vx*0.025,-0.16,0.16);}
@@ -5224,6 +5797,7 @@
       update(dt) {
         if(!this.isCombatReady())return;
         this.combatStarted=true;this.poseTime=simulationTime;
+        this.perceivePlayer(dt);
         const step=dt/FIXED_STEP_MS;
         this.hitFlash=Math.max(0,this.hitFlash-dt);this.blockFlash=Math.max(0,this.blockFlash-dt);
         this.leapCooldown=Math.max(0,this.leapCooldown-dt);
@@ -5232,6 +5806,8 @@
         this.poise=Math.max(0,this.poise-dt*0.008);
         this.devourNoticeTimer=Math.max(0,this.devourNoticeTimer-dt);
         this.navigationRetryTimer=Math.max(0,this.navigationRetryTimer-dt);
+        this.burstCooldown=Math.max(0,this.burstCooldown-dt);
+        this.platformSearchCooldown=Math.max(0,this.platformSearchCooldown-dt);
         if(this.blocked)this.blockedTimer+=dt;
         // Los impulsos heredados de habilidades no desplazan al Boss fuera de su física.
         if(!['KING_LEAP','KING_DROP'].includes(this.currentState))this.vx=this.vy=0;
@@ -5252,6 +5828,7 @@
         this.actionTimer=Math.max(0,this.actionTimer-dt);
         this.updateWaves(dt);
         if(isRunFinished())return;
+        if(this.updateEnvironment(dt))return;
         switch(this.currentState) {
           case 'KING_IDLE':
             if(this.actionTimer===0)this.decideAction();
@@ -5262,10 +5839,28 @@
             const supported=this.supportAt(this.x+this.vx*step,this.y);
             const hit=supported?this.moveBody(this.vx*step,0):true;
             this.blocked=!!hit;this.walkCycle+=Math.abs(this.vx)*0.09*step;
+            if(hit&&this.navRoute.length)this.invalidateNavigation('WALK_BLOCKED',false);
             if(!hit)this.blockedTimer=0;
-            if(hit||Math.abs(delta)<85&&this.advanceTarget===player.x||Math.abs(delta)<3||this.actionTimer===0)this.setState('KING_IDLE',360);
+            if(hit||Math.abs(delta)<85&&this.advanceTarget===player.x||Math.abs(delta)<3){
+              if(!hit&&this.navExpected?.mode==='WALK'&&Math.abs(this.x-this.navExpected.x)<5){this.navStep++;this.navExpected=null;}
+              this.setState('KING_IDLE',0);
+            }else if(this.actionTimer===0)this.actionTimer=850;
             break;
           }
+          case 'KING_BURST_PREP':
+            if(this.actionTimer===0){this.setState('KING_BURST');this.impactDust(13,6,0.08);}
+            break;
+          case 'KING_BURST': {
+            const dx=this.burstFacing*Math.min(8,this.burstRemaining);
+            const supported=this.supportAt(this.x+dx,this.y);
+            const before=this.x,hit=supported?this.moveBody(dx,0):true;
+            this.burstRemaining=Math.max(0,this.burstRemaining-Math.abs(this.x-before));this.walkCycle+=0.4;
+            if(hit||this.burstRemaining<=0.01){this.burstRemaining=0;this.setState('KING_BURST_RECOVER',400);}
+            break;
+          }
+          case 'KING_BURST_RECOVER':
+            if(this.actionTimer===0)this.setState('KING_IDLE',0);
+            break;
           case 'KING_OBSTACLE_SMASH':
             if(this.actionTimer===0){
               if(this.smashPhase==='WINDUP'){
@@ -5278,18 +5873,34 @@
             }
             break;
           case 'KING_DROP_PREP':
+            if(this.dropPlan?.chase){
+              const dx=this.dropPlan.launchX-this.x;
+              if(Math.abs(dx)>0.1){
+                const hit=this.moveBody(Math.sign(dx)*Math.min(3.2*step,Math.abs(dx)),0);
+                this.walkCycle+=0.2*step;
+                if(hit){this.navigationFailed('DROP');break;}
+              }
+            }
             if(this.actionTimer===0){
-              const plan=this.planDrop(this.dropTargetX);
+              if(this.dropPlan?.chase){
+                const plan=this.planChaseDrop(this.dropPlan.x,this.dropPlan.y,false);
+                if(!plan){this.navigationFailed('DROP');break;}
+                this.dropPlan=plan;this.dropAtEdge=true;this.flightVy=plan.vy;this.vx=plan.vx;this.vy=plan.vy;
+                this.isGrounded=false;this.setState('KING_DROP');this.impactDust(8,5,0.08);break;
+              }
+              const plan=this.navFlightTarget?.mode==='DROP' ? (this.planDrop(this.dropTargetX,true)||[])
+                .filter(d=>this.navigationRegion(d)?.id===this.navFlightTarget.region)
+                .sort((a,b)=>Math.abs(a.x-this.navFlightTarget.x)-Math.abs(b.x-this.navFlightTarget.x))[0] : this.planDrop(this.dropTargetX);
               if(!plan){this.navigationFailed('DROP');break;}
               this.dropPlan=plan;this.dropAtEdge=false;this.setState('KING_DROP');
             }
             break;
           case 'KING_DROP':this.updateDrop(step);break;
           case 'KING_DROP_LAND':
-            if(this.actionTimer===0)this.setState('KING_DROP_RECOVER',600);
+            if(this.actionTimer===0)this.setState('KING_DROP_RECOVER',this.navPursuitLanding?80:120);
             break;
           case 'KING_DROP_RECOVER':
-            if(this.actionTimer===0)this.setState('KING_IDLE',350);
+            if(this.actionTimer===0){this.navPursuitLanding=false;this.navPlanTimer=0;this.setState('KING_IDLE',0);}
             break;
           case 'KING_GUARD':
           case 'KING_STAGGER':
@@ -5305,29 +5916,39 @@
             const b=this.localToWorld(weapon?this.weaponTip(pose):pose.hand);
             const radius=weapon?13:14;
             const obstacle=[...obstacles.filter(o=>!o.broken),...platforms].find(o=>!(this.action==='GROUND_CRUSH'&&Math.abs(o.y-this.y)<1)&&segmentBoxHit(a.x,a.y,b.x,b.y,{x:o.x-radius,y:o.y-radius,w:o.w+radius*2,h:o.h+radius*2})!==null);
-            if(obstacle){this.setState('KING_RECOVER',650);this.comboCount=2;audio.playHit();break;}
-            this.strikeSegment(a,b,radius,weapon?18:this.action==='GROUND_CRUSH'?22:26);
+            if(obstacle){this.setState('KING_RECOVER',650);this.comboCount=this.bossTraits.warrior?3:2;audio.playHit();break;}
+            this.strikeSegment(a,b,radius,weapon?18:this.action==='GROUND_CRUSH'?(this.bossTraits.brute?25:22):(this.bossTraits.brute?32:26));
             if(isRunFinished())return;
             if(this.action==='GROUND_CRUSH'&&this.actionTimer===0){
-              this.impactDust(16,15,0.18);
-              this.waves.push({x:this.x,y:this.y,range:160,age:0,duration:350,damage:22,serial:this.attackSerial,both:false});
+              this.impactDust(this.bossTraits.brute?22:16,this.bossTraits.brute?18:15,0.18);
+              this.waves.push({x:this.x,y:this.y,range:this.bossTraits.brute?195:160,age:0,duration:350,damage:this.bossTraits.brute?25:22,serial:this.attackSerial,both:false});
             }
-            if(this.actionTimer===0)this.setState('KING_RECOVER',650);
+            if(this.actionTimer===0)this.setState('KING_RECOVER',this.bossTraits.brute&&this.action==='HEAVY_FIST'?750:650);
             break;
           }
           case 'KING_RECOVER': {
             const nearby=Math.abs(player.x-this.x)<120&&Math.abs(player.y-this.y)<45;
-            if(this.comboCount===1&&this.actionTimer<=360&&nearby&&['HEAVY_FIST','WEAPON_SWEEP'].includes(this.action)){
-              const next=this.action==='WEAPON_SWEEP'?'HEAVY_FIST':'GROUND_CRUSH';
-              if(!this.repeated(next)){this.comboCount=2;this.beginAttack(next);break;}
+            const warrior=this.bossTraits.warrior===1;
+            if(this.comboCount>0&&this.comboCount<(warrior?3:2)&&this.actionTimer<=this.actionDuration-(warrior?220:290)&&nearby&&
+              (warrior||['HEAVY_FIST','WEAPON_SWEEP'].includes(this.action))){
+              const next=this.action==='WEAPON_SWEEP'||this.action==='GROUND_CRUSH'?'HEAVY_FIST':
+                warrior&&this.comboCount===1?'WEAPON_SWEEP':'GROUND_CRUSH';
+              if(!this.repeated(next)){this.comboCount++;this.beginAttack(next);break;}
             }
             if(this.actionTimer===0){this.comboCount=0;this.setState('KING_IDLE',420);}
             break;
           }
           case 'KING_LEAP_PREP':
+            if(this.navFlightTarget&&this.actionTimer>200){
+              const dir=Math.sign(this.kingLeapTargetX-this.x),nx=this.x+dir*1.65*step;
+              if(this.supportAt(nx,this.y)&&!this.sweepBody(this.x,this.y,nx,this.y)&&
+                this.planLeap(this.kingLeapTargetX,this.kingLeapTargetY,nx,true)){
+                this.moveBody(nx-this.x,0);this.walkCycle+=0.15*step;
+              }
+            }
             if(Math.floor((this.actionTimer+dt)/140)!==Math.floor(this.actionTimer/140))activeVisuals.push(new StoneDebris(this.x-25,this.y-2),new StoneDebris(this.x+25,this.y-2));
             if(!this.leapLocked&&this.actionTimer<=200){
-              const plan=this.planLeap(player.x+player.vx*6,player.y);
+              const plan=this.navFlightTarget?.mode==='LEAP' ? this.planLeap(this.navFlightTarget.x,this.navFlightTarget.y,this.x,true) : this.planLeap(player.x+player.vx*6,player.y);
               if(plan){this.leapPlan=plan;this.kingLeapTargetX=plan.x;this.kingLeapTargetY=plan.y;}
               this.leapLocked=true;
             }
@@ -5379,10 +6000,13 @@
             break;
         }
       }
-      stopCombat() {this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;}
+      stopCombat() {this.clearEnvironment();this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
+        if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
+        this.navGraph=null;this.invalidateNavigation('RESIZE',false);
+        this.burstRemaining*=ratioX;
         this.dropTargetX*=ratioX;
-        if(this.dropPlan){this.dropPlan.edgeX*=ratioX;this.dropPlan.x*=ratioX;this.dropPlan.y+=deltaY;this.dropPlan.vx*=ratioX;}
+        if(this.dropPlan){this.dropPlan.edgeX*=ratioX;if(this.dropPlan.chase)this.dropPlan.launchX*=ratioX;this.dropPlan.x*=ratioX;this.dropPlan.y+=deltaY;this.dropPlan.vx*=ratioX;}
         if(this.tribute){
           const d=this.tribute;
           d.x=kingClamp(d.x*ratioX,-30,width+30);d.y+=deltaY;d.prevY=d.y;d.prevX=d.x;
@@ -5411,6 +6035,9 @@
           const safe=BossEncounter.findSpace(this.x);
           this.x=safe.x;this.y=safe.y;this.isGrounded=true;this.vx=this.vy=0;
         }
+        if(this.chunkGrabStart){this.chunkGrabStart.x*=ratioX;this.chunkGrabStart.y+=deltaY;}
+        if(this.chunkAim){this.chunkAim.vx*=ratioX;this.chunkAim.targetX*=ratioX;this.chunkAim.targetY+=deltaY;}
+        if(this.platformChunk)this.platformChunk.remapResize(ratioX,deltaY,this);
       }
       drawCombatWaves(c) {
         c.save();
@@ -5449,7 +6076,8 @@
       }
       drawKingBody(c,p,legs,t) {
         const breath=Math.sin(t*0.003)*0.7*p;
-        const stride=this.combatStarted&&this.currentState==='KING_ADVANCE'?Math.sin(this.walkCycle)*4:0;
+        const running=this.currentState==='KING_ADVANCE'||this.currentState==='KING_DROP_PREP'&&this.dropPlan?.chase||this.currentState==='KING_LEAP_PREP'&&this.navFlightTarget&&this.actionTimer>200;
+        const stride=this.combatStarted&&running?Math.sin(this.walkCycle)*4:0;
         const feet=this.combatStarted?-this.attackPose().crouch:0;
         const tucked=this.currentState==='KING_LEAP'?-3+9*kingEase(this.leapStep/16):0;
         this.line(c,[[-2,-23],[-8-4*legs,-11],[ -12-3*legs+stride,feet-tucked-Math.max(0,stride)]],'#6d8063',2.2+4*legs);
@@ -5483,7 +6111,7 @@
         const elbow=this.combatStarted?[(off[0]-9)/2-3,-30+j]:[-18-j-3*p,-30];
         this.line(c,[[-9,-39],elbow,off],'#89947a',2+2*p);
         this.line(c,[[-13,-38],[-19,-34]],'#c4b997',2);
-        this.drawBossTraitPart(c,'secondary');
+        if(!(this.currentState==='KING_GUARD'&&this.bossTraits.shieldbearer))this.drawBossTraitPart(c,'secondary');
       }
       drawKingWeapon(c,p) {
         if(p<=0) return;
@@ -5494,6 +6122,9 @@
         this.line(c,[[-31,-49],[-24,-45],[-30,-44]],'#302c31',1.5);
         this.line(c,[[-27,-32],[-34,-23],[-32,-17]],'#8b3e38',1.2);
         this.drawBossTraitPart(c,'weapon');
+        if(this.bossTraits.warrior&&this.currentState==='KING_ATTACK'&&this.action==='WEAPON_SWEEP'){
+          c.globalAlpha*=0.3;this.line(c,[[-35,-53],[-28,-61],[-18,-56]],'#e4b2a0',1.5);
+        }
         c.restore();
       }
       drawKingHead(c,p,roar) {
@@ -5535,6 +6166,7 @@
         this.drawKingWeapon(c,p.torso);
         this.drawKingSecondaryArm(c,p.torso,time);
         this.drawKingBody(c,p.torso,p.legs,time);
+        if(this.currentState==='KING_GUARD'&&this.bossTraits.shieldbearer)this.drawBossTraitPart(c,'secondary');
         this.drawKingHead(c,p.head,roar);
         this.drawKingMainArm(c,p.arm,time);
         c.restore();
@@ -5699,7 +6331,7 @@
       draw(c) {
         if(!this.active) return;
         if(this.timer<3500) this.drawVessel(c);
-        else if(this.king){this.king.drawRoyalDevour(c);this.king.draw(c);this.king.drawCombatWaves(c);}
+        else if(this.king){this.king.drawRoyalDevour(c);this.king.draw(c);this.king.drawCombatWaves(c);this.king.drawEnvironment(c);}
         if(this.roarPlayed && this.timer<4450) {
           const p=kingClamp((this.timer-3900)/550,0,1);
           c.save(); c.globalAlpha=(1-p)*0.45; c.strokeStyle='#d4c3a0'; c.lineWidth=1;
@@ -5742,6 +6374,9 @@
           const lines=['BOSS VESSEL: YES',`REVEAL PHASE: ${this.phase}`,`REVEAL TIMER: ${Math.round(this.timer)}`];
           if(this.king) {
             const k=this.king;
+            const navTarget=k.navFlightTarget||k.navExpected;
+            if(k.targetKingPlatform||k.platformChunk)lines.push(`BLOCKING PLATFORM: ${k.targetKingPlatform?.id||'NONE'} | BREAK: ${k.currentState.startsWith('KING_PLATFORM')?k.currentState.replace('KING_PLATFORM_',''):'NONE'}`,
+              `CHUNK: ${!k.platformChunk?'NONE':['FALLING','GROUND'].includes(k.platformChunk.state)?'GROUND':k.platformChunk.state==='GRABBING'?'GRAB':k.platformChunk.state}`);
             lines.push(`KING STATE: ${k.currentState}`,`KING HP: ${k.hp}/${k.maxHp}`,
               `KING X/Y: ${k.x.toFixed(1)} / ${k.y.toFixed(1)}`,
               `VX/VY: ${k.vx.toFixed(1)} / ${k.vy.toFixed(1)} | FACE: ${k.facing}`,
@@ -5751,6 +6386,17 @@
               `LEAP CD: ${(k.leapCooldown/1000).toFixed(1)}s`,
               `LEAP TARGET: ${k.kingLeapTargetX.toFixed(0)} / ${k.kingLeapTargetY.toFixed(0)}`,
               `GUARD: ${k.currentState==='KING_GUARD'?'ON':'OFF'} | LOCK: ${k.attackLocked||k.leapLocked}`);
+            lines.push(`SCOUT BURST: ${!k.bossTraits.scout?'OFF':k.burstCooldown>0?(k.burstCooldown/1000).toFixed(1)+'s':'READY'} | COMBO MAX: ${k.bossTraits.warrior?3:2}`,
+              `BRUTE POWER: ${k.bossTraits.brute?'ON':'OFF'} | SHIELD GUARD: ${k.bossTraits.shieldbearer?'ENHANCED':'BASE'}`);
+            lines.push(`NAV MODE: ${k.navMode} | PLAYER: ${k.playerSpatial?.region||'NONE'}`,
+              `PLAYER DX/DY: ${k.playerSpatial?.dx.toFixed(0)||0} / ${k.playerSpatial?.dy.toFixed(0)||0} | LOS: ${k.playerSpatial?.line?'YES':'NO'}`,
+              `NAV TARGET: ${navTarget?navTarget.x.toFixed(0)+' / '+navTarget.y.toFixed(0):'PLAYER'}`,
+              `ROUTE: ${k.navRoute.map(e=>e.mode[0]+':'+e.region).join(' > ')||(k.navFlightTarget?'LOCKED FLIGHT':'DIRECT')} | STEP: ${k.navStep+1}`,
+              `REPLAN: ${k.navReplans} | ${k.navReason}`);
+            lines.push(`REGION: ${k.spatialRegion(k.x,k.y)} > ${k.navGraph?.regions[navTarget?.region]?.key||'PLAYER'} | NEXT: ${navTarget?.mode||k.navMode}`,
+              `VERTICAL: ${k.playerSpatial?.vertical||'LEVEL'} | PREDICTED X: ${k.playerSpatial?.predictedX.toFixed(0)||0}`,
+              `COST: ${k.navMetrics.cost.toFixed(0)} | TRANSITIONS: ${k.navMetrics.transitions} | TURNS: ${k.navMetrics.reversals}`,
+              `PROGRESS: ${k.navMetrics.progress.toFixed(0)} | WHY: ${k.navWhy}`);
             lines.push(`DEVOURS: ${k.bossDevourCount} / ${k.bossMaxDevours} | NEXT: ${k.nextDevourThreshold()===null?'NONE':Math.round(k.nextDevourThreshold()*100)+'%'}`,
               `TRIBUTE: ${k.tributeType||'NONE'} | ${k.isRoyalRitual()?k.currentState.replace('KING_DEVOUR_',''):'NONE'}`,
               `TRAITS S:${k.bossTraits.scout} W:${k.bossTraits.warrior} B:${k.bossTraits.brute} A:${k.bossTraits.archer}`,
@@ -5942,6 +6588,8 @@
       hitStopTimer = 0;
 
       // Restaurar pilares
+      for(const p of levelPlatforms){p.bossBroken=false;p.bossHits=0;}
+      setupLevel();
       for (const obs of obstacles) {
         obs.hp = obs.maxHp;
         obs.broken = false;
@@ -6145,10 +6793,19 @@
       ctx.fillRect(0, groundY, width, 2);
 
       for (const p of platforms) {
+        const king=BossEncounter.king,breaking=king?.targetKingPlatform===p&&king.currentState.startsWith('KING_PLATFORM_BREAK');
+        const shake=breaking?Math.sin(simulationTime*0.06)*1.2:0;
         ctx.fillStyle = '#1e293b';
-        ctx.fillRect(p.x, p.y, p.w, p.h);
+        ctx.fillRect(p.x+shake, p.y, p.w, p.h);
         ctx.fillStyle = CLASSES[currentClassKey].color;
-        ctx.fillRect(p.x, p.y, p.w, 2);
+        ctx.fillRect(p.x+shake, p.y, p.w, 2);
+        if(p.bossHits||breaking){
+          ctx.save();ctx.strokeStyle='#c4b5a0';ctx.lineWidth=p.bossHits?2:1;
+          const x=p.x+p.w*0.5+shake;
+          ctx.beginPath();ctx.moveTo(x-25,p.y);ctx.lineTo(x-12,p.y+5);ctx.lineTo(x+2,p.y+3);ctx.lineTo(x+14,p.y+p.h);
+          if(p.bossHits){ctx.moveTo(x+2,p.y+3);ctx.lineTo(x+27,p.y+7);ctx.lineTo(x+40,p.y+3);}
+          ctx.stroke();ctx.restore();
+        }
       }
 
       for (const obs of obstacles) {
