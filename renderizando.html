@@ -4679,6 +4679,54 @@
       }
     }
 
+    // Virote anatómico del Rey: rectilíneo, sin homing y con barrido continuo.
+    class KingBoneProjectile {
+      constructor(x,y,targetX,targetY) {
+        const angle=Math.atan2(targetY-y,targetX-x);
+        this.x=x;this.y=y;this.vx=Math.cos(angle)*14;this.vy=Math.sin(angle)*14;
+        this.angle=angle;this.age=0;this.dead=false;this.runId=currentRunId;
+        this.damage=20;this.sourceType='GOBLIN_KING_ARCHER';this.damageType='projectile';
+      }
+      breakApart() {
+        if(this.dead)return;this.dead=true;
+        if(isRunFinished())return;
+        for(let i=0;i<6;i++)activeVisuals.push(new ArcaneParticle(this.x,this.y,'#d7cfad'));
+        audio.playHit();
+      }
+      update(dt) {
+        if(this.dead)return;
+        if(this.runId!==currentRunId||isRunFinished()){this.dead=true;return;}
+        if(gameState!=='PLAYING')return;
+        if(![this.x,this.y,this.vx,this.vy].every(Number.isFinite)){this.dead=true;return;}
+        const step=dt/FIXED_STEP_MS,nx=this.x+this.vx*step,ny=this.y+this.vy*step;
+        const wall=KingPlatformChunk.hitScene(this.x,this.y,nx,ny,6);
+        const hit=segmentBoxHit(this.x,this.y,nx,ny,{x:player.x-18,y:player.y-61,w:36,h:67});
+        const playerFirst=hit!==null&&(!wall||hit<wall.t);
+        const t=playerFirst?hit:wall?.t;
+        if(t!==undefined){
+          this.x+=(nx-this.x)*t;this.y+=(ny-this.y)*t;this.breakApart();
+          if(playerFirst){
+            const accepted=player.takeDamage(this.damage,this.sourceType);
+            if(accepted&&!isRunFinished()){player.vx=Math.sign(this.vx)*4;player.vy=-3;player.isGrounded=false;coyoteTimer=0;}
+          }
+          return;
+        }
+        this.x=nx;this.y=ny;this.age+=dt;
+        if(this.age>3500||this.x< -60||this.x>width+60||this.y< -60||this.y>groundY+60)this.dead=true;
+      }
+      remapResize(ratioX,deltaY) {
+        this.x*=ratioX;this.y+=deltaY;this.vx*=ratioX;this.angle=Math.atan2(this.vy,this.vx);
+        if(KingPlatformChunk.hitScene(this.x,this.y,this.x,this.y,6))this.breakApart();
+      }
+      draw(c) {
+        if(this.dead)return;
+        c.save();c.translate(this.x,this.y);c.rotate(this.angle);
+        c.strokeStyle='rgba(210,210,179,0.3)';c.lineWidth=2;c.beginPath();c.moveTo(-15,0);c.lineTo(-39,0);c.stroke();
+        c.fillStyle='#e3d8b8';c.beginPath();c.moveTo(20,0);c.lineTo(4,-5);c.lineTo(-16,-2);c.lineTo(-11,0);c.lineTo(-16,3);c.lineTo(4,4);c.closePath();c.fill();
+        c.strokeStyle='#807b68';c.lineWidth=1;c.beginPath();c.moveTo(-10,0);c.lineTo(13,0);c.stroke();c.restore();
+      }
+    }
+
     class GoblinKing {
       constructor(x, y, facing) {
         this.x=x; this.y=y; this.facing=facing || 1;
@@ -4719,6 +4767,7 @@
         this.lastIntent='NONE';this.recentIntents=[];this.topKingOptions=[];this.tacticalWhy='INITIAL';
         this.decisionLatency=0;this.decisionWait=0;this.tacticalEvaluations=0;
         this.observedGrounded=player.isGrounded;this.observedAttack=false;this.landingOpportunity=0;this.attackOpportunity=0;
+        this.boneCooldown=0;this.boneTarget=null;this.boneLocked=false;this.boneProjectile=null;this.boneAngle=0;
       }
       getHitboxes() {
         const s=this.scale;
@@ -4908,6 +4957,19 @@
           });
           draw('archer',()=>{
             const [x,y]=pose.elbow;
+            if(this.currentState.startsWith('KING_BONE_SHOT')){
+              const formed=this.currentState==='KING_BONE_SHOT_PREP'?kingEase(1-this.actionTimer/420):1;
+              const angle=Math.atan2(Math.sin(this.boneAngle),Math.cos(this.boneAngle)*this.facing)-pose.lean;
+              const tension=this.currentState==='KING_BONE_SHOT_FIRE'?Math.sin(this.poseTime*0.1)*1.5:formed*2;
+              c.save();c.translate(x,y);c.rotate(angle);
+              this.line(c,[[-6,-9-tension],[5,-13-tension],[10,-5],[7,8+tension],[-5,11+tension]],'#d4cbaa',2.5);
+              this.line(c,[[-6,-9-tension],[-10-formed*3,0],[-5,11+tension]],'#a3b09a',0.8);
+              if(['KING_BONE_SHOT_PREP','KING_BONE_SHOT_AIM'].includes(this.currentState)){
+                this.polygon(c,[[-10*formed,-1.2],[12*formed,-2],[18*formed,0],[12*formed,2],[-10*formed,1.2]],'#eee0bc');
+                this.line(c,[[-8,-4],[-12-formed*2,-7]],'#a6bca4',0.6);
+              }
+              c.restore();return;
+            }
             this.line(c,[[x-5,y-15],[x+7,y-8],[x+9,y+4],[x+3,y+15]],'#c6c3a4',2);
             this.line(c,[[x-5,y-15],[x+3,y+15]],'#849389',0.7);
             for(let i=0;i<3;i++)this.line(c,[[17+i*3,-36],[18+i*3,-49+i*2]],'#c2ba98',1.5);
@@ -5356,6 +5418,7 @@
       }
       drawEnvironment(c) {
         if(this.platformChunk)this.platformChunk.draw(c);
+        if(this.boneProjectile)this.boneProjectile.draw(c);
       }
       clearEnvironment() {
         if(this.platformChunk)this.platformChunk.dead=true;
@@ -5611,6 +5674,63 @@
       decideAction() {
         this.selectKingAction();
       }
+      boneAnchor() { return this.localToWorld([25,-36]); }
+      boneMuzzle() {
+        const p=this.boneAnchor();return {x:p.x+Math.cos(this.boneAngle)*14*this.scale,y:p.y+Math.sin(this.boneAngle)*14*this.scale};
+      }
+      planBoneShot() {
+        if(!this.bossTraits.archer||this.isRoyalRitual())return null;
+        const origin=this.boneAnchor();
+        const x=kingClamp(player.x+kingClamp(player.vx*8,-50,50),18,width-18);
+        const y=kingClamp(player.y-28+kingClamp(player.vy*4,-24,24),18,groundY-12);
+        const dx=x-origin.x,dy=y-origin.y;
+        if(dx*this.facing<=70||Math.hypot(dx,dy)<210)return null;
+        if(KingPlatformChunk.hitScene(origin.x,origin.y,x,y,6))return null;
+        return {x,y};
+      }
+      beginBoneShot() {
+        if(!this.isCombatReady()||this.isRoyalRitual()||this.boneCooldown>0||this.boneProjectile&&!this.boneProjectile.dead)return false;
+        const target=this.planBoneShot();if(!target)return false;
+        this.boneTarget=target;this.boneLocked=false;
+        const origin=this.boneAnchor();this.boneAngle=Math.atan2(target.y-origin.y,target.x-origin.x);
+        this.comboCount=0;this.action='BONE_SHOT';this.rememberAction('BONE_SHOT');
+        this.setState('KING_BONE_SHOT_PREP',420);return true;
+      }
+      clearBonePower() {
+        if(this.boneProjectile)this.boneProjectile.dead=true;
+        this.boneProjectile=null;this.boneTarget=null;this.boneLocked=false;this.boneCooldown=0;
+      }
+      updateBoneShot(dt) {
+        if(!this.currentState.startsWith('KING_BONE_SHOT')){
+          if(this.boneTarget){this.boneTarget=null;this.boneLocked=false;this.boneCooldown=Math.max(this.boneCooldown,1200);}
+          return false;
+        }
+        if(this.currentState==='KING_BONE_SHOT_PREP'){
+          if(this.actionTimer===0)this.setState('KING_BONE_SHOT_AIM',600);
+        }else if(this.currentState==='KING_BONE_SHOT_AIM'){
+          if(!this.boneLocked){
+            const target=this.planBoneShot();
+            if(!target){this.boneTarget=null;this.boneCooldown=Math.max(this.boneCooldown,1200);this.setState('KING_BONE_SHOT_RECOVER',450);return true;}
+            const blend=1-Math.pow(0.8,dt/FIXED_STEP_MS);
+            this.boneTarget.x+=(target.x-this.boneTarget.x)*blend;this.boneTarget.y+=(target.y-this.boneTarget.y)*blend;
+            const origin=this.boneAnchor();this.boneAngle=Math.atan2(this.boneTarget.y-origin.y,this.boneTarget.x-origin.x);
+            if(this.actionTimer<=240)this.boneLocked=true;
+          }
+          if(this.actionTimer===0){
+            const origin=this.boneAnchor(),muzzle=this.boneMuzzle();
+            // También validar el tramo dentro del arma: nunca nacer al otro lado de un sólido.
+            if(!KingPlatformChunk.hitScene(origin.x,origin.y,muzzle.x,muzzle.y,6)){
+              this.boneProjectile=new KingBoneProjectile(muzzle.x,muzzle.y,this.boneTarget.x,this.boneTarget.y);
+              for(let i=0;i<7;i++)activeVisuals.push(new ArcaneParticle(muzzle.x,muzzle.y,'#ddd0a9'));
+              screenShake=Math.max(screenShake,4);audio.playSword(110);
+            }
+            this.boneCooldown=4800;this.setState('KING_BONE_SHOT_FIRE',100);
+          }
+        }else if(this.currentState==='KING_BONE_SHOT_FIRE'){
+          if(this.actionTimer===0)this.setState('KING_BONE_SHOT_RECOVER',450);
+        }else if(this.actionTimer===0){this.boneTarget=null;this.boneLocked=false;this.setState('KING_IDLE',0);}
+        return true;
+      }
       observeKingSituation(dt) {
         this.landingOpportunity=Math.max(0,this.landingOpportunity-dt);
         this.attackOpportunity=Math.max(0,this.attackOpportunity-dt);
@@ -5679,6 +5799,9 @@
           Math.hypot(chunk.x-this.x,chunk.y-(this.y-30*this.scale))<55*this.scale&&
           !KingPlatformChunk.hitScene(chunk.x,chunk.y,this.chunkHoldPoint().x,this.chunkHoldPoint().y)&&this.planChunkThrow())
           add('USE_CHUNK','CHUNK',0.84+(s.dist>350?0.08:0),'ACCESSIBLE_CHUNK + SAFE_TRAJECTORY');
+        if(this.bossTraits.archer&&this.boneCooldown===0&&(!this.boneProjectile||this.boneProjectile.dead)&&s.front&&s.dist>210&&this.planBoneShot())
+          add('RANGED_PRESSURE','BONE_SHOT',0.76+Math.min(0.16,s.dist/3000)+(s.above?0.12:0)+(s.speed<1?0.06:0)-(this.blocked?0.25:0),
+            'ARCHER_READY + CLEAR_SHOT'+(s.above?' + ELEVATED_PLAYER':''));
         add('RECOVER','WAIT',0.08,'NO_USEFUL_COMMITMENT');
         for(const option of options)option.score=this.scoreKingAction(option);
         return options.sort((a,b)=>b.score-a.score);
@@ -5695,6 +5818,7 @@
         this.intentCommit=350;this.decisionLatency=this.decisionWait;this.decisionWait=0;
         if(['HEAVY_FIST','WEAPON_SWEEP','GROUND_CRUSH'].includes(best.action)){this.comboCount=1;this.beginAttack(best.action);return;}
         if(best.action==='GUARD'){this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;}
+        if(best.action==='BONE_SHOT'&&this.beginBoneShot())return;
         if(best.action==='CHUNK'&&this.beginChunkGrab())return;
         if(best.action==='REPOSITION'&&!s.front&&s.dist<155){this.setState('KING_IDLE',150);return;} // Giro existente de 280 ms, nunca instantáneo.
         if(best.action==='INTERCEPT'){
@@ -5790,6 +5914,14 @@
         const swing=active?kingEase(1-this.actionTimer/this.actionDuration):this.currentState==='KING_RECOVER'?1:0;
         const mix=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
         const pose={hand:[30,-7],elbow:[26,-25],offHand:[-27,-31],weaponAngle:0,lean:0,crouch:0};
+        if(this.currentState.startsWith('KING_BONE_SHOT')){
+          const load=this.currentState==='KING_BONE_SHOT_PREP'?kingEase(1-this.actionTimer/420):1;
+          pose.lean=-0.035*load;
+          const localAngle=Math.atan2(Math.sin(this.boneAngle),Math.cos(this.boneAngle)*this.facing)-pose.lean;
+          const recoil=this.currentState==='KING_BONE_SHOT_FIRE'?3*this.actionTimer/100:0;
+          pose.elbow=[25,-36];pose.hand=[25+Math.cos(localAngle)*(20-recoil),-36+Math.sin(localAngle)*(20-recoil)];
+          pose.offHand=[14,-33];pose.weaponAngle=-0.2;pose.crouch=load;return pose;
+        }
         if(['KING_PLATFORM_BREAK_PREP','KING_PLATFORM_BREAK'].includes(this.currentState)&&this.targetKingPlatform){
           const platform=this.targetKingPlatform;
           const end=[(kingClamp(this.x,platform.x,platform.x+platform.w)-this.x)/this.scale*this.facing,
@@ -5908,6 +6040,8 @@
         this.navigationRetryTimer=Math.max(0,this.navigationRetryTimer-dt);
         this.burstCooldown=Math.max(0,this.burstCooldown-dt);
         this.platformSearchCooldown=Math.max(0,this.platformSearchCooldown-dt);
+        this.boneCooldown=Math.max(0,this.boneCooldown-dt);
+        if(this.boneProjectile){this.boneProjectile.update(dt);if(this.boneProjectile?.dead)this.boneProjectile=null;if(isRunFinished())return;}
         if(this.blocked)this.blockedTimer+=dt;
         // Los impulsos heredados de habilidades no desplazan al Boss fuera de su física.
         if(!['KING_LEAP','KING_DROP'].includes(this.currentState))this.vx=this.vy=0;
@@ -5920,6 +6054,7 @@
         if(!this.isRoyalRitual() && threshold!==null && this.hp<=this.maxHp*threshold &&
           !['KING_LEAP','KING_DROP'].includes(this.currentState) && this.supportAt(this.x,this.y))this.beginRoyalDevour();
         if(this.isRoyalRitual()){
+          if(this.boneTarget||this.boneProjectile)this.clearBonePower();
           this.actionTimer=Math.max(0,this.actionTimer-dt);
           this.updateRoyalDevour(dt);return;
         }
@@ -5929,6 +6064,7 @@
         this.updateWaves(dt);
         if(isRunFinished())return;
         if(this.updateEnvironment(dt))return;
+        if(this.updateBoneShot(dt))return;
         switch(this.currentState) {
           case 'KING_IDLE':
             if(this.actionTimer===0)this.decideAction();
@@ -6101,7 +6237,7 @@
             break;
         }
       }
-      stopCombat() {this.clearEnvironment();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
+      stopCombat() {this.clearEnvironment();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
         if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
         this.navGraph=null;this.invalidateNavigation('RESIZE',false);
@@ -6139,6 +6275,11 @@
         if(this.chunkGrabStart){this.chunkGrabStart.x*=ratioX;this.chunkGrabStart.y+=deltaY;}
         if(this.chunkAim){this.chunkAim.vx*=ratioX;this.chunkAim.targetX*=ratioX;this.chunkAim.targetY+=deltaY;}
         if(this.platformChunk)this.platformChunk.remapResize(ratioX,deltaY,this);
+        if(this.boneTarget){
+          this.boneTarget.x*=ratioX;this.boneTarget.y+=deltaY;
+          const origin=this.boneAnchor();this.boneAngle=Math.atan2(this.boneTarget.y-origin.y,this.boneTarget.x-origin.x);
+        }
+        if(this.boneProjectile)this.boneProjectile.remapResize(ratioX,deltaY);
       }
       drawCombatWaves(c) {
         c.save();
@@ -6476,6 +6617,8 @@
           if(this.king) {
             const k=this.king;
             const navTarget=k.navFlightTarget||k.navExpected;
+            lines.push(`ARCHER POWER: ${k.bossTraits.archer?'ON':'OFF'} | BONE SHOT: ${k.boneCooldown>0?(k.boneCooldown/1000).toFixed(1)+'s':'READY'}`,
+              `BONE TARGET: ${k.boneTarget?k.boneTarget.x.toFixed(0)+' / '+k.boneTarget.y.toFixed(0):'NONE'} | BONE LOCK: ${k.boneLocked?'YES':'NO'}`);
             lines.push(`KING AI: ${k.kingIntent} ${k.intentScore.toFixed(2)} | WHY: ${k.tacticalWhy}`,
               `TOP: ${k.topKingOptions.map(o=>o.intent+'/'+o.action+' '+o.score.toFixed(2)).join(' | ')}`,
               `DECISION LATENCY: ${Math.round(k.decisionLatency)}ms | COMMIT: ${Math.round(k.intentCommit)}ms`,
