@@ -4715,6 +4715,10 @@
         this.navMetrics={cost:0,transitions:0,reversals:0,progress:0};this.navWhy='INITIAL';
         this.targetKingPlatform=null;this.platformChunk=null;this.platformSearchCooldown=0;
         this.chunkAim=null;this.chunkLocked=false;this.chunkGrabStart=null;
+        this.tacticalTimer=0;this.intentCommit=0;this.kingIntent='RECOVER';this.intentScore=0;
+        this.lastIntent='NONE';this.recentIntents=[];this.topKingOptions=[];this.tacticalWhy='INITIAL';
+        this.decisionLatency=0;this.decisionWait=0;this.tacticalEvaluations=0;
+        this.observedGrounded=player.isGrounded;this.observedAttack=false;this.landingOpportunity=0;this.attackOpportunity=0;
       }
       getHitboxes() {
         const s=this.scale;
@@ -4932,7 +4936,11 @@
         });
       }
       isCombatReady() { return gameState==='PLAYING' && BossEncounter.active && BossEncounter.king===this && this.runId===currentRunId && !this.dead && !['KING_FORMING','KING_BREATH','KING_ROAR'].includes(this.currentState); }
-      setState(state,duration=0) { this.currentState=state; this.actionTimer=duration; this.actionDuration=duration; }
+      setState(state,duration=0) {
+        // La recuperación física termina antes de esta pausa de decisión, no se acorta el telegraph.
+        if(state==='KING_IDLE'&&['KING_RECOVER','KING_GUARD','KING_STAGGER','KING_LAND_RECOVER'].includes(this.currentState))duration=Math.min(duration,150);
+        this.currentState=state;this.actionTimer=duration;this.actionDuration=duration;
+      }
       rememberAction(action) {
         this.lastKingAction=action;
         this.kingActionHistory.push(action);
@@ -5268,7 +5276,7 @@
           this.dropAtEdge=true;this.flightVy=this.vx=this.vy=0;this.isGrounded=false;
           this.dropRecoveryLeap=false;this.setState('KING_DROP');return;
         }
-        if(!this.beginChunkGrab())this.setState('KING_RECOVER',180);
+        this.setState('KING_RECOVER',180); // El cerebro decide si merece la pena recogerlo.
       }
       chunkHoldPoint() { return {x:this.x+this.facing*24*this.scale,y:this.y-48*this.scale}; }
       planChunkThrow(origin=this.chunkHoldPoint()) {
@@ -5601,19 +5609,108 @@
         this.navReason='NO_SAFE_CONNECTION';this.navWhy='BODY_CLEARANCE_LIMIT';this.setState('KING_IDLE',500);return true;
       }
       decideAction() {
+        this.selectKingAction();
+      }
+      observeKingSituation(dt) {
+        this.landingOpportunity=Math.max(0,this.landingOpportunity-dt);
+        this.attackOpportunity=Math.max(0,this.attackOpportunity-dt);
+        const attacking=player.attackAnim>0;
+        if(player.isGrounded&&!this.observedGrounded)this.landingOpportunity=400;
+        // Fin de una animación visible: oportunidad imperfecta, no lectura de cooldown/input.
+        if(!attacking&&this.observedAttack)this.attackOpportunity=300;
+        this.observedGrounded=player.isGrounded;this.observedAttack=attacking;
+      }
+      evaluateTacticalSituation() {
         this.perceivePlayer(0);
-        const dx=player.x-this.x,dist=Math.abs(dx),dy=this.y-player.y;
-        const closing=dx*player.vx< -20,elevated=Math.abs(dy)>65;
-        if(this.navigateToPlayer())return;
-        if(!elevated&&dist<155) {
-          if(closing&&this.guardCooldown<=0&&this.lastKingAction!=='GUARD'){
-            this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;
-          }
-          let action=dist<85?'WEAPON_SWEEP':this.lastKingAction==='HEAVY_FIST'?'GROUND_CRUSH':'HEAVY_FIST';
-          if(this.repeated(action))action=action==='WEAPON_SWEEP'?'HEAVY_FIST':'WEAPON_SWEEP';
-          this.comboCount=1;this.beginAttack(action);return;
+        const p=this.playerSpatial,dist=Math.abs(p.dx),front=p.dx*this.facing>=0;
+        const speed=Math.abs(player.vx),away=Math.sign(p.dx)*player.vx;
+        let projectileThreat=0;
+        for(const shot of projectiles){
+          if(shot.dead||![shot.x,shot.y,shot.vx,shot.vy].every(Number.isFinite))continue;
+          const dx=shot.x-this.x;
+          if(dx*this.facing<=0||dx*shot.vx>=0)continue;
+          const steps=Math.min(20,Math.abs(dx)/Math.max(1,Math.abs(shot.vx)));
+          if(segmentBoxHit(shot.x,shot.y,shot.x+shot.vx*steps,shot.y+shot.vy*steps,
+            {x:this.x-17*this.scale,y:this.y-66*this.scale,w:34*this.scale,h:66*this.scale})!==null)projectileThreat=1;
         }
-        this.advanceTarget=player.x;this.setState('KING_ADVANCE',850);
+        const near=kingClamp(1-dist/180,0,1),level=Math.abs(p.dy)<65;
+        const line=p.line||!([...platforms,...obstacles.filter(o=>!o.broken)].some(o=>
+          segmentBoxHit(this.x,this.y-25,player.x,player.y-25,o)!==null));
+        const wave=player.isGrounded&&Math.abs(p.dy)<12&&dist<=(this.bossTraits.brute?195:160)&&this.waveHasSurface(this.x,player.x,this.y)&&
+          !obstacles.some(o=>!o.broken&&segmentBoxHit(this.x,this.y-11,player.x,this.y-11,{x:o.x-9,y:o.y-9,w:o.w+18,h:o.h+18})!==null);
+        return {dist,front,speed,away,near,level,line,wave,projectileThreat,
+          crossing:level&&dist<145&&speed>2&&away<0,
+          punish:Math.max(this.landingOpportunity/400,this.attackOpportunity/300),
+          attacking:player.attackAnim>0,above:p.vertical==='ABOVE',below:p.vertical==='BELOW',
+          predictedX:p.predictedX,grounded:player.isGrounded,jumping:player.vy<0,falling:player.vy>0,
+          hp:this.hp/this.maxHp,poise:this.poise,region:this.spatialRegion(this.x,this.y),playerRegion:p.region};
+      }
+      scoreKingAction(option) {
+        let score=option.score;
+        for(let i=0;i<this.kingActionHistory.length;i++)if(this.kingActionHistory[i]===option.action)
+          score-=0.045*(i+1)/this.kingActionHistory.length;
+        if(this.kingIntent===option.intent)score+=0.035; // Hysteresis, sin azar ni cambios por render.
+        if(option.intent==='GUARD'&&this.recentIntents.slice(-3).includes('GUARD'))score-=0.12;
+        return kingClamp(score,0,1);
+      }
+      buildKingOptions(s) {
+        const options=[],add=(intent,action,score,why)=>options.push({intent,action,score,why});
+        const opportunity=s.punish>0.15?'PUNISH':'ATTACK';
+        if(s.level&&s.line&&s.front){
+          const reach=kingClamp(1-Math.max(0,s.dist-65)/100,0,1);
+          if(reach>0){
+            add(opportunity,'HEAVY_FIST',0.38+reach*0.32+s.punish*0.19-Math.max(0,s.away)*0.065-(s.crossing?0.18:0),'CLOSE_PREDICTABLE'+(s.punish?' + OBSERVED_OPENING':''));
+            add(opportunity,'WEAPON_SWEEP',0.33+reach*0.25+(s.crossing?0.34:0)+Math.min(0.15,s.speed*0.035),'CROSSING_OR_CLOSE_COVERAGE');
+          }
+          if(s.wave)add(opportunity,'GROUND_CRUSH',0.48+s.near*0.22+(s.speed<1?0.08:0)+this.landingOpportunity/400*0.19,'GROUND_CONNECTED + SPACE_CONTROL');
+        }
+        if(this.guardCooldown<=0&&s.front&&(s.level&&s.dist<200||s.projectileThreat))
+          add('GUARD','GUARD',0.2+s.near*0.16+(s.attacking?0.48:0)+s.projectileThreat*0.8+(this.bossTraits.shieldbearer?0.05:0),'OBSERVED_FRONTAL_PRESSURE');
+        if(!s.level)add('VERTICAL_CHASE','NAVIGATE',0.9,s.below?'PLAYER_BELOW + B2_DESCENT':'PLAYER_ABOVE + B2_ROUTE');
+        if(s.level){
+          add('PRESSURE','NAVIGATE',0.26+Math.min(0.55,s.dist/750)+(s.speed<0.5?0.08:0)-(s.line&&s.dist<155?0.3:0),'DISTANCE + DIRECT_PURSUIT');
+          if(s.away>1.5)add('INTERCEPT','INTERCEPT',0.48+Math.min(0.3,s.dist/700)+Math.min(0.15,s.away*0.025),'PLAYER_MOVING_AWAY'+(this.bossTraits.scout&&this.burstCooldown===0?' + SCOUT_BURST_READY':''));
+          if(!s.front)add('REPOSITION','REPOSITION',0.88,'PLAYER_BEHIND + TURN_WINDOW');
+        }
+        if(this.blocked&&this.blockedTimer>=900&&this.navMode==='NO_ROUTE')
+          add('BREAK_OBSTACLE','NAVIGATE',0.93,'B2_CONFIRMED_BLOCKAGE');
+        const chunk=this.platformChunk;
+        if(chunk&&!chunk.dead&&['GROUND','FALLING'].includes(chunk.state)&&s.dist>220&&
+          Math.hypot(chunk.x-this.x,chunk.y-(this.y-30*this.scale))<55*this.scale&&
+          !KingPlatformChunk.hitScene(chunk.x,chunk.y,this.chunkHoldPoint().x,this.chunkHoldPoint().y)&&this.planChunkThrow())
+          add('USE_CHUNK','CHUNK',0.84+(s.dist>350?0.08:0),'ACCESSIBLE_CHUNK + SAFE_TRAJECTORY');
+        add('RECOVER','WAIT',0.08,'NO_USEFUL_COMMITMENT');
+        for(const option of options)option.score=this.scoreKingAction(option);
+        return options.sort((a,b)=>b.score-a.score);
+      }
+      selectKingAction() {
+        if(!['KING_IDLE','KING_ADVANCE'].includes(this.currentState)||!this.isCombatReady()||this.tacticalTimer>0)return;
+        if(this.currentState==='KING_ADVANCE'&&this.intentCommit>0)return;
+        this.tacticalTimer=150;this.tacticalEvaluations++;
+        const s=this.evaluateTacticalSituation(),options=this.buildKingOptions(s),best=options[0];
+        this.topKingOptions=options.slice(0,3);
+        if(this.currentState==='KING_ADVANCE'&&['NAVIGATE','INTERCEPT','REPOSITION'].includes(best.action)&&this.kingIntent===best.intent)return;
+        this.lastIntent=this.kingIntent;this.kingIntent=best.intent;this.intentScore=best.score;this.tacticalWhy=best.why;
+        if(this.recentIntents.at(-1)!==best.intent){this.recentIntents.push(best.intent);if(this.recentIntents.length>5)this.recentIntents.shift();}
+        this.intentCommit=350;this.decisionLatency=this.decisionWait;this.decisionWait=0;
+        if(['HEAVY_FIST','WEAPON_SWEEP','GROUND_CRUSH'].includes(best.action)){this.comboCount=1;this.beginAttack(best.action);return;}
+        if(best.action==='GUARD'){this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;}
+        if(best.action==='CHUNK'&&this.beginChunkGrab())return;
+        if(best.action==='REPOSITION'&&!s.front&&s.dist<155){this.setState('KING_IDLE',150);return;} // Giro existente de 280 ms, nunca instantáneo.
+        if(best.action==='INTERCEPT'){
+          const region=this.navigationRegion(this),x=kingClamp(s.predictedX-Math.sign(this.playerSpatial.dx)*85,17*this.scale,width-17*this.scale);
+          if(region&&x>=region.x0&&x<=region.x1&&!this.sweepBody(this.x,this.y,x,this.y)){this.navigationWalk(x);return;}
+        }
+        if(best.action!=='WAIT'){
+          if(this.navigateToPlayer()){
+            if(['KING_OBSTACLE_SMASH','KING_PLATFORM_BREAK_PREP'].includes(this.currentState)){
+              this.kingIntent='BREAK_OBSTACLE';this.tacticalWhy=this.navWhy;this.intentScore=0.93;
+              if(this.recentIntents.at(-1)!=='BREAK_OBSTACLE'){this.recentIntents.push('BREAK_OBSTACLE');if(this.recentIntents.length>5)this.recentIntents.shift();}
+            }
+            return;
+          }
+        }
+        this.setState('KING_IDLE',150);
       }
       beginAttack(action) {
         this.action=action;this.attackLocked=false;this.attackAimY=player.y-25;
@@ -5798,6 +5895,9 @@
         if(!this.isCombatReady())return;
         this.combatStarted=true;this.poseTime=simulationTime;
         this.perceivePlayer(dt);
+        this.observeKingSituation(dt);
+        this.tacticalTimer=Math.max(0,this.tacticalTimer-dt);this.intentCommit=Math.max(0,this.intentCommit-dt);
+        if(this.currentState==='KING_IDLE'&&this.actionDuration<=150)this.decisionWait+=dt; // Separar espera geométrica de latencia táctica.
         const step=dt/FIXED_STEP_MS;
         this.hitFlash=Math.max(0,this.hitFlash-dt);this.blockFlash=Math.max(0,this.blockFlash-dt);
         this.leapCooldown=Math.max(0,this.leapCooldown-dt);
@@ -5834,6 +5934,7 @@
             if(this.actionTimer===0)this.decideAction();
             break;
           case 'KING_ADVANCE': {
+            this.selectKingAction();if(this.currentState!=='KING_ADVANCE')break;
             const delta=this.advanceTarget-this.x,dir=Math.sign(delta);
             this.vx=dir*Math.min(1.65,Math.abs(delta));
             const supported=this.supportAt(this.x+this.vx*step,this.y);
@@ -6000,7 +6101,7 @@
             break;
         }
       }
-      stopCombat() {this.clearEnvironment();this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
+      stopCombat() {this.clearEnvironment();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
         if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
         this.navGraph=null;this.invalidateNavigation('RESIZE',false);
@@ -6375,6 +6476,10 @@
           if(this.king) {
             const k=this.king;
             const navTarget=k.navFlightTarget||k.navExpected;
+            lines.push(`KING AI: ${k.kingIntent} ${k.intentScore.toFixed(2)} | WHY: ${k.tacticalWhy}`,
+              `TOP: ${k.topKingOptions.map(o=>o.intent+'/'+o.action+' '+o.score.toFixed(2)).join(' | ')}`,
+              `DECISION LATENCY: ${Math.round(k.decisionLatency)}ms | COMMIT: ${Math.round(k.intentCommit)}ms`,
+              `LAST INTENTS: ${k.recentIntents.join(' > ')}`);
             if(k.targetKingPlatform||k.platformChunk)lines.push(`BLOCKING PLATFORM: ${k.targetKingPlatform?.id||'NONE'} | BREAK: ${k.currentState.startsWith('KING_PLATFORM')?k.currentState.replace('KING_PLATFORM_',''):'NONE'}`,
               `CHUNK: ${!k.platformChunk?'NONE':['FALLING','GROUND'].includes(k.platformChunk.state)?'GROUND':k.platformChunk.state==='GRABBING'?'GRAB':k.platformChunk.state}`);
             lines.push(`KING STATE: ${k.currentState}`,`KING HP: ${k.hp}/${k.maxHp}`,
