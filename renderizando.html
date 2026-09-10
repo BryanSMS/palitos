@@ -4943,6 +4943,7 @@
         this.shamanSpell=null;this.shamanChannelInterrupted=false;this.shamanTarget=null;this.shamanLocked=false;
         this.shamanHex=null;this.shamanSigil=null;this.shamanPulseCount=0;this.shamanPulseFlash=0;
         this.shamanRegion=null;this.shamanRegionTime=0;this.shamanStillTime=0;
+        this.clearKingSynergies();
       }
       getHitboxes() {
         const s=this.scale;
@@ -4961,6 +4962,7 @@
             const strong=source.damageType==='aoe'||rawAmount>=22;
             amount*=this.bossTraits.shieldbearer ? (strong?0.65:0.32) : (strong?0.8:0.6);
             amount=Math.round(amount*100)/100;this.blockFlash=140;
+            if(this.hasKingSynergy('shieldbearer','warrior'))this.kingCounterWindow=600;
           }
         }
         this.hp=Math.max(0,this.hp-amount); this.hitFlash=100;
@@ -4986,6 +4988,7 @@
         if(this.isRoyalRitual() || this.devourThresholdIndex>=this.bossMaxDevours || this.dead)return;
         const pool=Object.keys(this.bossTraits).filter(type=>!this.bossTraits[type]);
         if(!pool.length)return;
+        this.clearKingSynergies();
         this.clearEnvironment();
         this.tributeType=pool[Math.floor(Math.random()*pool.length)];
         this.devourThresholdIndex++; // Reserva el umbral una sola vez, incluso bajo daño continuo.
@@ -5098,7 +5101,7 @@
             const sway=Math.sin(t*0.004)*2;
             if(this.currentState.startsWith('KING_WING_')){
               const state=this.currentState;
-              const open=state==='KING_WING_PREP'?kingEase(1-this.actionTimer/550):state==='KING_WING_DIVE'?.35:state==='KING_WING_DIVE_PREP'?.6:1;
+              const open=state==='KING_WING_PREP'?kingEase(1-this.actionTimer/550):state==='KING_WING_DIVE'?.35:state==='KING_WING_DIVE_PREP'?(this.royalMeteor?1.15:.6):1;
               const beat=state==='KING_WING_TAKEOFF'?12*Math.sin((1-this.actionTimer/100)*Math.PI):state==='KING_WING_HUNT'||state==='KING_WING_ASCEND'?Math.sin(this.wingAirTime*.031)*7:state==='KING_WING_LAND'?14:0;
               for(const side of [-1,1]){
                 const root=[-10,-40],tip=[side*(25+35*open),-53+beat+(side<0?4:0)];
@@ -5146,14 +5149,14 @@
           });
           draw('archer',()=>{
             const [x,y]=pose.elbow;
-            if(this.currentState.startsWith('KING_BONE_SHOT')){
+            if(this.currentState.startsWith('KING_BONE_SHOT')||this.aerialShotTimer>0){
               const formed=this.currentState==='KING_BONE_SHOT_PREP'?kingEase(1-this.actionTimer/420):1;
               const angle=Math.atan2(Math.sin(this.boneAngle),Math.cos(this.boneAngle)*this.facing)-pose.lean;
               const tension=this.currentState==='KING_BONE_SHOT_FIRE'?Math.sin(this.poseTime*0.1)*1.5:formed*2;
               c.save();c.translate(x,y);c.rotate(angle);
               this.line(c,[[-6,-9-tension],[5,-13-tension],[10,-5],[7,8+tension],[-5,11+tension]],'#d4cbaa',2.5);
               this.line(c,[[-6,-9-tension],[-10-formed*3,0],[-5,11+tension]],'#a3b09a',0.8);
-              if(['KING_BONE_SHOT_PREP','KING_BONE_SHOT_AIM'].includes(this.currentState)){
+              if(['KING_BONE_SHOT_PREP','KING_BONE_SHOT_AIM'].includes(this.currentState)||this.aerialShotTimer>0){
                 this.polygon(c,[[-10*formed,-1.2],[12*formed,-2],[18*formed,0],[12*formed,2],[-10*formed,1.2]],'#eee0bc');
                 this.line(c,[[-8,-4],[-12-formed*2,-7]],'#a6bca4',0.6);
               }
@@ -5196,6 +5199,7 @@
         // La recuperación física termina antes de esta pausa de decisión, no se acorta el telegraph.
         if(state==='KING_IDLE'&&['KING_RECOVER','KING_GUARD','KING_STAGGER','KING_LAND_RECOVER'].includes(this.currentState))duration=Math.min(duration,150);
         this.currentState=state;this.actionTimer=duration;this.actionDuration=duration;
+        this.syncKingSynergyState();
       }
       rememberAction(action) {
         this.lastKingAction=action;
@@ -5611,6 +5615,11 @@
         return false;
       }
       drawEnvironment(c) {
+        if(this.royalMeteor&&['KING_WING_DIVE_PREP','KING_WING_DIVE'].includes(this.currentState)){
+          c.save();c.strokeStyle='#d0bea1';c.lineWidth=1.5;
+          for(let i=0;i<6;i++){const x=this.x+Math.sin(i*4)*43,y=this.y-70-i*15; c.beginPath();c.moveTo(x,y);c.lineTo(x-this.vx*(1+i*.2),y-12-i*3);c.stroke();}
+          c.restore();
+        }
         this.drawShamanPower(c);
         if(this.platformChunk)this.platformChunk.draw(c);
         if(this.boneProjectile)this.boneProjectile.draw(c);
@@ -5874,6 +5883,101 @@
       decideAction() {
         this.selectKingAction();
       }
+      hasKingSynergy(a,b) { return a!==b&&this.bossTraits[a]===1&&this.bossTraits[b]===1; }
+      clearKingSynergies() {
+        this.royalMeteor=false;this.rushPending=false;this.rushComboActive=false;this.kingCounterWindow=0;
+        this.aerialShotUsed=false;this.aerialShotTimer=0;this.aerialShotTarget=null;this.aerialShotLocked=false;
+        this.synergyAction=null;this.synergyWhy='NONE';this.synergyScore=0;
+      }
+      syncKingSynergyState() {
+        const wing=this.currentState.startsWith('KING_WING_'),burst=this.currentState.startsWith('KING_BURST');
+        const attacking=['KING_ATTACK_PREP','KING_ATTACK','KING_RECOVER'].includes(this.currentState);
+        if(!wing){this.royalMeteor=false;this.aerialShotUsed=false;this.aerialShotTimer=0;this.aerialShotTarget=null;this.aerialShotLocked=false;}
+        if(this.currentState!=='KING_WING_HUNT'){this.aerialShotTimer=0;this.aerialShotTarget=null;this.aerialShotLocked=false;}
+        if(!burst)this.rushPending=false;
+        if(!attacking)this.rushComboActive=false;
+        if(this.currentState!=='KING_GUARD')this.kingCounterWindow=0;
+        const active=this.synergyAction==='ROYAL_METEOR'?wing&&this.royalMeteor:
+          this.synergyAction==='RUSH_COMBO'?burst&&this.rushPending||attacking&&this.rushComboActive:
+          this.synergyAction==='GUARD_COUNTER'?attacking:
+          this.synergyAction==='AERIAL_BONE_SHOT'?this.aerialShotTimer>0:false;
+        if(!active){this.synergyAction=null;this.synergyScore=0;this.synergyWhy='NONE';}
+      }
+      recordKingSynergy(option) {
+        this.synergyAction=option.action;this.synergyWhy=option.why;this.synergyScore=option.score;
+        this.kingIntent=option.intent;this.intentScore=option.score;this.tacticalWhy=option.why;
+        this.rememberAction(option.action);
+        if(this.recentIntents.at(-1)!==option.intent){this.recentIntents.push(option.intent);if(this.recentIntents.length>5)this.recentIntents.shift();}
+      }
+      buildKingSynergyOptions(s) {
+        const out=[],add=(action,score,why)=>out.push({intent:'SYNERGY',action,score,why});
+        if(this.isRoyalRitual()||!this.isCombatReady())return out;
+        if(this.currentState==='KING_WING_HUNT'){
+          if(this.hasKingSynergy('winged','archer')&&!this.royalMeteor&&!this.aerialShotUsed&&this.boneCooldown===0&&
+            (!this.boneProjectile||this.boneProjectile.dead)&&this.actionTimer>=470&&s.dist>200&&s.front&&this.planBoneShot())
+            add('AERIAL_BONE_SHOT',.56+Math.min(.18,s.dist/3000)+(s.below?.1:0),'WINGED+ARCHER / CLEAR_AERIAL_ANGLE');
+          return out;
+        }
+        if(this.currentState==='KING_GUARD'){
+          if(this.hasKingSynergy('shieldbearer','warrior')&&this.kingCounterWindow>0&&this.actionDuration-this.actionTimer>=180&&s.front&&s.level&&s.line&&s.dist<150)
+            add('GUARD_COUNTER',.72+s.near*.2-(s.away>2?.2:0),'SHIELD+WARRIOR / ACCEPTED_BLOCK + CLOSE_TARGET');
+          return out;
+        }
+        if(!['KING_IDLE','KING_ADVANCE'].includes(this.currentState))return out;
+        if(this.hasKingSynergy('winged','brute')&&this.wingCooldown===0&&s.above&&s.front&&s.dist>180&&s.speed<3&&this.planAerialHunt())
+          add('ROYAL_METEOR',.88+Math.min(.1,Math.abs(this.playerSpatial.dy)/3000)-(s.dist<240?.08:0),'WINGED+BRUTE / ELEVATED_TARGET + AERIAL_ROUTE');
+        if(this.hasKingSynergy('scout','warrior')&&this.burstCooldown===0&&!this.kingActionHistory.slice(-2).includes('BURST')&&
+          s.level&&s.front&&s.line&&s.dist>=210&&s.dist<=340){
+          const x=player.x-this.facing*95,end=this.x+this.facing*Math.min(210,Math.abs(x-this.x));
+          if(this.supportAt(end,this.y)&&!this.sweepBody(this.x,this.y,end,this.y))
+            add('RUSH_COMBO',.78+(s.away>0?.1:0),'SCOUT+WARRIOR / CLEAR_BURST + PRESSURE');
+        }
+        return out;
+      }
+      chooseKingSynergyWindow(s,holdAction) {
+        if(this.tacticalTimer>0)return null;
+        this.tacticalTimer=150;
+        const options=this.buildKingSynergyOptions(s);
+        options.push({intent:this.kingIntent,action:holdAction,score:.64,why:'CONTINUE_COMMITTED_MANEUVER'});
+        for(const o of options)o.score=this.scoreKingAction(o);
+        options.sort((a,b)=>b.score-a.score);this.topKingOptions=options.slice(0,3);
+        return options[0].action===holdAction?null:options[0];
+      }
+      beginKingSynergy(option) {
+        if(!this.buildKingSynergyOptions(this.evaluateTacticalSituation()).some(o=>o.action===option.action))return false;
+        if(option.action==='ROYAL_METEOR'&&this.hasKingSynergy('winged','brute')){
+          if(!this.beginAerialHunt())return false;this.royalMeteor=true;
+        }else if(option.action==='RUSH_COMBO'&&this.hasKingSynergy('scout','warrior')){
+          this.navigationWalk(player.x-this.facing*95);
+          if(this.currentState!=='KING_BURST_PREP')return false;this.rushPending=true;
+        }else if(option.action==='GUARD_COUNTER'&&this.hasKingSynergy('shieldbearer','warrior')&&this.kingCounterWindow>0){
+          this.kingCounterWindow=0;this.comboCount=3;this.beginAttack('WEAPON_SWEEP');this.setState('KING_ATTACK_PREP',260);
+        }else if(option.action==='AERIAL_BONE_SHOT'&&this.hasKingSynergy('winged','archer')&&!this.royalMeteor&&!this.aerialShotUsed){
+          const target=this.planBoneShot();if(!target)return false;
+          this.aerialShotUsed=true;this.aerialShotTarget=target;this.aerialShotTimer=450;this.aerialShotLocked=false;
+        }else return false;
+        this.recordKingSynergy(option);return true;
+      }
+      updateAerialBoneShot(dt) {
+        if(this.aerialShotTimer<=0)return;
+        this.aerialShotTimer=Math.max(0,this.aerialShotTimer-dt);
+        if(!this.aerialShotLocked){
+          const target=this.planBoneShot();
+          if(target){const blend=1-Math.pow(.8,dt/FIXED_STEP_MS);this.aerialShotTarget.x+=(target.x-this.aerialShotTarget.x)*blend;this.aerialShotTarget.y+=(target.y-this.aerialShotTarget.y)*blend;}
+          if(this.aerialShotTimer<=200)this.aerialShotLocked=true;
+        }
+        const origin=this.boneAnchor();
+        this.boneAngle=Math.atan2(this.aerialShotTarget.y-origin.y,this.aerialShotTarget.x-origin.x);
+        if(this.aerialShotTimer===0){
+          const muzzle=this.boneMuzzle();
+          if(!KingPlatformChunk.hitScene(origin.x,origin.y,muzzle.x,muzzle.y,6))
+            this.boneProjectile=new KingBoneProjectile(muzzle.x,muzzle.y,this.aerialShotTarget.x,this.aerialShotTarget.y);
+          this.boneCooldown=4800;audio.playSword(110);
+          for(let i=0;i<6;i++)activeVisuals.push(new ArcaneParticle(muzzle.x,muzzle.y,'#ddd0a9'));
+          this.wingDiveTarget=this.chooseWingDiveTarget();this.setState('KING_WING_DIVE_PREP',420);
+        }
+      }
+
       isShamanCasting() { return this.currentState.startsWith('KING_SHAMAN_'); }
       shamanHand() { return this.localToWorld([-24,-32]); }
       planShamanHex() {
@@ -5986,12 +6090,14 @@
       beginAerialHunt() {
         if(!this.isCombatReady()||this.isRoyalRitual()||this.wingCooldown>0)return false;
         const plan=this.planAerialHunt();if(!plan)return false;
+        this.royalMeteor=false;this.aerialShotUsed=false;this.aerialShotTimer=0;this.aerialShotTarget=null;this.aerialShotLocked=false;
         this.wingPlan=plan;this.wingTarget={x:plan.x,y:plan.y};this.wingDiveTarget=null;this.wingDiveLocked=false;
         this.wingAirTime=0;this.wingSlide=0;this.wingLandedHit=false;this.comboCount=0;this.waves=[];
         this.wingSlideBounces=0;this.wingEscapePlan=null;this.wingEscapeStep=0;this.wingCollision=false;
         this.action='AERIAL_HUNT';this.rememberAction('AERIAL_HUNT');this.setState('KING_WING_PREP',550);return true;
       }
       clearWingPower() {
+        this.royalMeteor=false;this.aerialShotUsed=false;this.aerialShotTimer=0;this.aerialShotTarget=null;this.aerialShotLocked=false;
         this.wingCooldown=this.wingAirTime=this.wingFlapTimer=this.wingSlide=0;
         this.wingPlan=this.wingTarget=this.wingDiveTarget=null;this.wingDiveLocked=false;this.wingLandedHit=false;
         this.wingSlideBounces=0;this.wingEscapePlan=null;this.wingEscapeStep=0;this.wingCollision=false;
@@ -6016,15 +6122,16 @@
         if(!this.isCombatReady()||this.wingLandedHit||!this.supportAt(this.x,this.y))return;
         this.vx=this.vy=0;this.isGrounded=true;this.wingSlide=0;
         this.invalidateNavigation('AERIAL_LANDING',false);this.navFlightTarget=null;
-        this.setState('KING_WING_LAND',180);this.impactDust(30,19,0.22);
+        this.aerialShotTimer=0;this.aerialShotTarget=null;
+        this.setState('KING_WING_LAND',180);this.impactDust(this.royalMeteor?40:30,this.royalMeteor?23:19,0.22);
         this.wingLandedHit=true;
         this.wingEscapePlan=null;
         if(this.wingCollision)return; // Un choque previo convierte el resto de la maniobra en recuperación física.
         const x=kingClamp(this.x,player.x-12,player.x+12),y=kingClamp(this.y-8,player.y-55,player.y);
-        if(Math.hypot(x-this.x,y-(this.y-8))>105)return;
+        if(Math.hypot(x-this.x,y-(this.y-8))>(this.royalMeteor?130:105))return;
         if([...platforms,...obstacles.filter(o=>!o.broken)].some(o=>segmentBoxHit(this.x,this.y-8,x,y,o)!==null))return;
-        const accepted=player.takeDamage(24,'GOBLIN_KING_WINGED');
-        if(accepted&&!isRunFinished()){player.vx=(Math.sign(player.x-this.x)||this.facing)*5;player.vy=-4;player.isGrounded=false;coyoteTimer=0;}
+        const accepted=player.takeDamage(this.royalMeteor?31:24,'GOBLIN_KING_WINGED');
+        if(accepted&&!isRunFinished()){player.vx=(Math.sign(player.x-this.x)||this.facing)*(this.royalMeteor?6.5:5);player.vy=this.royalMeteor?-5:-4;player.isGrounded=false;coyoteTimer=0;}
       }
       updateAerialHunt(dt) {
         if(!this.currentState.startsWith('KING_WING_'))return false;
@@ -6037,11 +6144,15 @@
           }
           return true;
         }
-        if(this.currentState==='KING_WING_LAND'){if(this.actionTimer===0)this.setState('KING_WING_RECOVER',850);return true;}
+        if(this.currentState==='KING_WING_LAND'){if(this.actionTimer===0)this.setState('KING_WING_RECOVER',this.royalMeteor?1050:850);return true;}
         if(this.currentState==='KING_WING_RECOVER'){
           if(this.actionTimer===0){this.wingTarget=this.wingDiveTarget=this.wingPlan=null;this.wingDiveLocked=false;this.setState('KING_IDLE',0);}return true;
         }
         const step=dt/FIXED_STEP_MS;this.wingAirTime+=dt;this.vy+=this.gravity*step;
+        if(this.currentState==='KING_WING_HUNT'){
+          if(this.hasKingSynergy('winged','archer')&&!this.royalMeteor&&!this.aerialShotUsed){const choice=this.chooseKingSynergyWindow(this.evaluateTacticalSituation(),'CONTINUE_HUNT');if(choice)this.beginKingSynergy(choice);}
+          this.updateAerialBoneShot(dt);
+        }
         this.wingFlapTimer=Math.max(0,this.wingFlapTimer-dt);
         if(['KING_WING_TAKEOFF','KING_WING_ASCEND'].includes(this.currentState)){
           this.vy-=0.24*step; // La gravedad sigue superando la asistencia continua.
@@ -6052,7 +6163,7 @@
             this.wingFlapTimer=200;this.vy=Math.max(-3,this.vy-5.8);
             if(this.currentState==='KING_WING_HUNT'){
               const desired=kingClamp((this.playerSpatial.predictedX-this.x)/70,-4,4);
-              this.vx+=kingClamp(desired-this.vx,-0.7,0.7);
+              const correction=this.aerialShotTimer>0?.35:.7;this.vx+=kingClamp(desired-this.vx,-correction,correction);
             }
           }
           if(this.currentState==='KING_WING_HUNT'&&this.actionTimer===0){this.wingDiveTarget=this.chooseWingDiveTarget();this.setState('KING_WING_DIVE_PREP',420);}
@@ -6060,7 +6171,8 @@
             if(!this.wingDiveLocked){this.wingDiveTarget=this.chooseWingDiveTarget();if(this.actionTimer<=240)this.wingDiveLocked=true;}
             if(this.actionTimer===0){
               const dx=this.wingDiveTarget.x-this.x,dy=Math.max(30,this.wingDiveTarget.y-this.y),length=Math.hypot(dx,dy);
-              this.vx=dx/length*12;this.vy=Math.max(7,dy/length*12);this.setState('KING_WING_DIVE');
+              const speed=this.royalMeteor?15:12;
+              this.vx=dx/length*speed;this.vy=Math.max(7,dy/length*speed);this.setState('KING_WING_DIVE');
             }
           }
         }
@@ -6082,6 +6194,7 @@
         const hit=this.moveBody(this.vx*step,Math.min(18,this.vy)*step);
         if(hit){
           this.wingEscapePlan=null;
+          this.aerialShotTimer=0;this.aerialShotTarget=null;
           if(hit.ny===-1&&hit.surface){
             if(this.supportAt(this.x,this.y)){this.landWingPower();return true;}
             this.isGrounded=false;this.vx=0;
@@ -6302,6 +6415,7 @@
           if(this.shamanSigilCooldown===0&&(!this.shamanSigil||this.shamanSigil.dead)&&s.dist>190&&this.planShamanSigil())
             add('ZONE_CONTROL','SIGIL',.55+Math.min(.22,this.shamanStillTime/15000)+Math.min(.12,this.shamanRegionTime/25000)+(s.above?.1:0)-(this.shamanRegionTime<500?.2:0),'SURFACE_TARGET + SHORT_TERM_STILLNESS');
         }
+        options.push(...this.buildKingSynergyOptions(s));
         for(const option of options)option.score=this.scoreKingAction(option);
         return options.sort((a,b)=>b.score-a.score);
       }
@@ -6315,6 +6429,7 @@
         this.lastIntent=this.kingIntent;this.kingIntent=best.intent;this.intentScore=best.score;this.tacticalWhy=best.why;
         if(this.recentIntents.at(-1)!==best.intent){this.recentIntents.push(best.intent);if(this.recentIntents.length>5)this.recentIntents.shift();}
         this.intentCommit=350;this.decisionLatency=this.decisionWait;this.decisionWait=0;
+        if(best.intent==='SYNERGY'&&this.beginKingSynergy(best))return;
         if(['HEAVY_FIST','WEAPON_SWEEP','GROUND_CRUSH'].includes(best.action)){this.comboCount=1;this.beginAttack(best.action);return;}
         if(best.action==='GUARD'){this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;}
         if(['MEND','HEX','SIGIL'].includes(best.action)&&this.beginShamanSpell(best.action))return;
@@ -6425,7 +6540,11 @@
           const prep=this.currentState==='KING_WING_PREP',land=this.currentState==='KING_WING_LAND'||this.currentState==='KING_WING_RECOVER';
           pose.crouch=prep?7*kingEase(1-this.actionTimer/550):land?5:-2;
           pose.lean=this.currentState==='KING_WING_DIVE'?0.16:kingClamp(this.vx*.015,-.08,.08);
-          pose.hand=this.currentState==='KING_WING_DIVE'?[31,-12]:land?[25,-5]:[24,-32];pose.elbow=[23,-36];pose.offHand=[-25,-25];pose.weaponAngle=-.35;return pose;
+          pose.hand=this.currentState==='KING_WING_DIVE'?[31,-12]:land?[25,-5]:[24,-32];pose.elbow=[23,-36];pose.offHand=[-25,-25];pose.weaponAngle=-.35;
+          if(this.royalMeteor&&this.currentState==='KING_WING_DIVE_PREP'){pose.crouch=6;pose.hand=[32,-34];pose.lean=.13;}
+          if(this.royalMeteor&&this.currentState==='KING_WING_DIVE'){pose.hand=[36,-9];pose.lean=.23;}
+          if(this.aerialShotTimer>0){const angle=Math.atan2(Math.sin(this.boneAngle),Math.cos(this.boneAngle)*this.facing)-pose.lean;pose.elbow=[25,-36];pose.hand=[25+Math.cos(angle)*20,-36+Math.sin(angle)*20];pose.offHand=[14,-33];}
+          return pose;
         }
         if(this.currentState.startsWith('KING_BOMB_')){
           const prep=this.currentState==='KING_BOMB_PREP',p=prep?kingEase(1-this.actionTimer/540):1;
@@ -6548,6 +6667,8 @@
       update(dt) {
         if(!this.isCombatReady())return;
         this.combatStarted=true;this.poseTime=simulationTime;
+        this.kingCounterWindow=Math.max(0,this.kingCounterWindow-dt);
+        this.syncKingSynergyState();
         this.wingCooldown=Math.max(0,this.wingCooldown-dt);
         this.perceivePlayer(dt);
         this.observeKingSituation(dt);
@@ -6637,11 +6758,16 @@
             const supported=this.supportAt(this.x+dx,this.y);
             const before=this.x,hit=supported?this.moveBody(dx,0):true;
             this.burstRemaining=Math.max(0,this.burstRemaining-Math.abs(this.x-before));this.walkCycle+=0.4;
-            if(hit||this.burstRemaining<=0.01){this.burstRemaining=0;this.setState('KING_BURST_RECOVER',400);}
+            if(hit||this.burstRemaining<=0.01){this.burstRemaining=0;this.setState('KING_BURST_RECOVER',this.rushPending?180:400);}
             break;
           }
           case 'KING_BURST_RECOVER':
-            if(this.actionTimer===0)this.setState('KING_IDLE',0);
+            if(this.actionTimer===0){
+              const rush=this.rushPending;this.rushPending=false;
+              const s=rush?this.evaluateTacticalSituation():null;
+              if(s&&s.front&&s.level&&s.line&&s.dist<150){this.rushComboActive=true;this.comboCount=1;this.beginAttack(s.crossing||s.speed>2?'WEAPON_SWEEP':'HEAVY_FIST');}
+              else this.setState('KING_IDLE',0);
+            }
             break;
           case 'KING_OBSTACLE_SMASH':
             if(this.actionTimer===0){
@@ -6685,6 +6811,9 @@
             if(this.actionTimer===0){this.navPursuitLanding=false;this.navPlanTimer=0;this.setState('KING_IDLE',0);}
             break;
           case 'KING_GUARD':
+            if(this.kingCounterWindow>0){const choice=this.chooseKingSynergyWindow(this.evaluateTacticalSituation(),'KEEP_GUARD');if(choice&&this.beginKingSynergy(choice))break;}
+            if(this.actionTimer===0)this.setState('KING_IDLE',320);
+            break;
           case 'KING_STAGGER':
             if(this.actionTimer===0)this.setState('KING_IDLE',320);
             break;
@@ -6711,7 +6840,9 @@
           case 'KING_RECOVER': {
             const nearby=Math.abs(player.x-this.x)<120&&Math.abs(player.y-this.y)<45;
             const warrior=this.bossTraits.warrior===1;
+            const rushSituation=this.rushComboActive?this.evaluateTacticalSituation():null;
             if(this.comboCount>0&&this.comboCount<(warrior?3:2)&&this.actionTimer<=this.actionDuration-(warrior?220:290)&&nearby&&
+              (!rushSituation||rushSituation.front&&rushSituation.level&&rushSituation.line)&&
               (warrior||['HEAVY_FIST','WEAPON_SWEEP'].includes(this.action))){
               const next=this.action==='WEAPON_SWEEP'||this.action==='GROUND_CRUSH'?'HEAVY_FIST':
                 warrior&&this.comboCount===1?'WEAPON_SWEEP':'GROUND_CRUSH';
@@ -6782,7 +6913,7 @@
             break;
         }
       }
-      stopCombat() {this.clearEnvironment();this.clearShamanPower();this.clearWingPower();this.clearBombPower();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
+      stopCombat() {this.clearEnvironment();this.clearKingSynergies();this.clearShamanPower();this.clearWingPower();this.clearBombPower();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
         if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
         this.navGraph=null;this.invalidateNavigation('RESIZE',false);
@@ -6833,6 +6964,7 @@
         if(this.shamanTarget){this.shamanTarget.x*=ratioX;this.shamanTarget.y+=deltaY;}
         if(this.shamanHex)this.shamanHex.remapResize(ratioX,deltaY);
         if(this.shamanSigil)this.shamanSigil.remapResize(ratioX);
+        if(this.aerialShotTarget){this.aerialShotTarget.x*=ratioX;this.aerialShotTarget.y+=deltaY;}
       }
       drawCombatWaves(c) {
         c.save();
@@ -7170,6 +7302,10 @@
           if(this.king) {
             const k=this.king;
             const navTarget=k.navFlightTarget||k.navExpected;
+            const synergies=[['winged','brute'],['scout','warrior'],['shieldbearer','warrior'],['winged','archer']].filter(([a,b])=>k.hasKingSynergy(a,b)).map(pair=>pair.join('+').toUpperCase());
+            lines.push(`ACTIVE SYNERGIES: ${synergies.join(' | ')||'NONE'}`,
+              `SYNERGY: ${k.synergyAction||'NONE'} | SCORE: ${k.synergyScore.toFixed(2)} | WHY: ${k.synergyWhy}`,
+              `COUNTER: ${k.kingCounterWindow.toFixed(0)}ms | AIR SHOT: ${k.aerialShotUsed?'USED':'READY'} | LOCK: ${k.aerialShotLocked}`);
             lines.push(`SHAMAN POWER: ${k.bossTraits.shaman?'ON':'OFF'} | SPELL: ${k.shamanSpell||'NONE'} | GLOBAL: ${(k.shamanGlobalCooldown/1000).toFixed(1)}s`,
               `MEND: ${k.shamanHealCharges}/2 | CD: ${(k.shamanHealCooldown/1000).toFixed(1)}s | CHANNEL: ${k.currentState==='KING_SHAMAN_MEND_CHANNEL'} | PULSE: ${k.shamanPulseCount}/3 NEXT: ${Math.max(0,(k.shamanPulseCount+1)*500-(1500-k.actionTimer)).toFixed(0)}ms`,
               `HEX CD: ${(k.shamanHexCooldown/1000).toFixed(1)}s | TARGET: ${k.shamanTarget?k.shamanTarget.x.toFixed(0)+' / '+k.shamanTarget.y.toFixed(0):'NONE'} | LOCK: ${k.shamanLocked} | CURSE: ${(player.kingHexTimer/1000).toFixed(1)}s`,
