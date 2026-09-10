@@ -4852,6 +4852,9 @@
         this.boneCooldown=0;this.boneTarget=null;this.boneLocked=false;this.boneProjectile=null;this.boneAngle=0;
         this.volatileBomb=null;this.bombCooldown=0;this.bombTarget=null;this.bombPlan=null;this.bombLocked=false;
         this.bombStillTime=0;this.bombRegionTime=0;this.bombObservedRegion=null;
+        this.wingCooldown=0;this.wingAirTime=0;this.wingTarget=null;this.wingDiveTarget=null;this.wingDiveLocked=false;
+        this.wingPlan=null;this.wingFlapTimer=0;this.wingSlide=0;this.wingLandedHit=false;
+        this.wingSlideBounces=0;this.wingEscapePlan=null;this.wingEscapeStep=0;this.wingCollision=false;
       }
       getHitboxes() {
         const s=this.scale;
@@ -4876,7 +4879,7 @@
         audio.playHit();
         damageNumbers.push(new DamageNumber(this.x,this.y-58*this.scale,`-${amount}`,'#fff'));
         if(rawAmount>=18&&!this.isRoyalRitual())this.poise+=Math.min(35,rawAmount);
-        if(this.poise>=(this.bossTraits.brute?108:80) && !['KING_LEAP','KING_DROP'].includes(this.currentState) && !this.isRoyalRitual()){
+        if(this.poise>=(this.bossTraits.brute?108:80) && !['KING_LEAP','KING_DROP'].includes(this.currentState) && !this.isWingAirborne() && !this.isRoyalRitual()){
           this.poise=0;this.comboCount=0;this.waves=[];this.setState('KING_STAGGER',650);
         }
         if (this.hp===0) {
@@ -5004,6 +5007,18 @@
         if(part==='back'){
           draw('winged',()=>{
             const sway=Math.sin(t*0.004)*2;
+            if(this.currentState.startsWith('KING_WING_')){
+              const state=this.currentState;
+              const open=state==='KING_WING_PREP'?kingEase(1-this.actionTimer/550):state==='KING_WING_DIVE'?.35:state==='KING_WING_DIVE_PREP'?.6:1;
+              const beat=state==='KING_WING_TAKEOFF'?12*Math.sin((1-this.actionTimer/100)*Math.PI):state==='KING_WING_HUNT'||state==='KING_WING_ASCEND'?Math.sin(this.wingAirTime*.031)*7:state==='KING_WING_LAND'?14:0;
+              for(const side of [-1,1]){
+                const root=[-10,-40],tip=[side*(25+35*open),-53+beat+(side<0?4:0)];
+                this.polygon(c,[root,[side*(18+24*open),-78+beat*.5],tip,[side*(20+23*open),-27],[side*24,-41],[side*15,-29]],'#49424e');
+                this.line(c,[root,[side*(18+24*open),-78+beat*.5],tip,[side*(20+23*open),-27]],'#c5bca6',3);
+                this.line(c,[root,tip],'#8e8588',1.5);
+              }
+              return;
+            }
             for(const side of [-1,1]){
               const root=[-10,-40],tip=[side*43,-60+sway];
               this.polygon(c,[root,[side*28,-71],tip,[side*32,-36],[side*27,-47],[side*20,-37],[-8,-28]],'#413d48');
@@ -5764,6 +5779,137 @@
       decideAction() {
         this.selectKingAction();
       }
+      isWingAirborne() { return ['KING_WING_TAKEOFF','KING_WING_ASCEND','KING_WING_HUNT','KING_WING_DIVE_PREP','KING_WING_DIVE'].includes(this.currentState); }
+      planAerialHunt() {
+        if(!this.bossTraits.winged||this.isRoyalRitual()||!this.supportAt(this.x,this.y))return null;
+        const targetY=Math.max(66*this.scale+55,Math.min(this.y-200,player.y-100));
+        if(this.y-targetY<120)return null;
+        const dx=player.x-this.x,dir=Math.sign(dx)||this.facing;
+        for(const vx of [dir*Math.min(4,Math.abs(dx)/70),0,-dir*3]){
+          let x=this.x,y=this.y,vy=-18,valid=true,steps=0;
+          while(y>targetY&&steps<60){
+            vy+=this.gravity-0.24;
+            const nx=x+vx,ny=y+vy;
+            if(this.sweepBody(x,y,nx,ny)||!this.bodyClear(nx,ny)){valid=false;break;}
+            x=nx;y=ny;steps++;
+          }
+          if(valid&&y<=targetY)return {vx,vy:-18,x,y,steps};
+        }
+        return null;
+      }
+      beginAerialHunt() {
+        if(!this.isCombatReady()||this.isRoyalRitual()||this.wingCooldown>0)return false;
+        const plan=this.planAerialHunt();if(!plan)return false;
+        this.wingPlan=plan;this.wingTarget={x:plan.x,y:plan.y};this.wingDiveTarget=null;this.wingDiveLocked=false;
+        this.wingAirTime=0;this.wingSlide=0;this.wingLandedHit=false;this.comboCount=0;this.waves=[];
+        this.wingSlideBounces=0;this.wingEscapePlan=null;this.wingEscapeStep=0;this.wingCollision=false;
+        this.action='AERIAL_HUNT';this.rememberAction('AERIAL_HUNT');this.setState('KING_WING_PREP',550);return true;
+      }
+      clearWingPower() {
+        this.wingCooldown=this.wingAirTime=this.wingFlapTimer=this.wingSlide=0;
+        this.wingPlan=this.wingTarget=this.wingDiveTarget=null;this.wingDiveLocked=false;this.wingLandedHit=false;
+        this.wingSlideBounces=0;this.wingEscapePlan=null;this.wingEscapeStep=0;this.wingCollision=false;
+      }
+      chooseWingDiveTarget() {
+        const predicted=kingClamp(player.x+kingClamp(player.vx*10,-60,60),17*this.scale,width-17*this.scale);
+        let best=null,score=Infinity;
+        for(const surface of [{x:0,y:groundY,w:width},...platforms]){
+          if(surface.y<=this.y+15||surface.w<34*this.scale+4)continue;
+          for(const tx of [predicted,this.x,surface.x+surface.w/2]){
+            const x=kingClamp(tx,surface.x+17*this.scale+2,surface.x+surface.w-17*this.scale-2);
+            if(!this.bodyClear(x,surface.y)||!this.supportAt(x,surface.y))continue;
+            const hit=this.sweepBody(this.x,this.y,x,surface.y);
+            if(hit&&!(hit.ny===-1&&hit.surface?.y===surface.y))continue;
+            const cost=Math.abs(x-predicted)+Math.abs(surface.y-player.y)*1.4;
+            if(cost<score){best={x,y:surface.y};score=cost;}
+          }
+        }
+        return best||{x:this.x,y:groundY};
+      }
+      landWingPower() {
+        if(!this.isCombatReady()||this.wingLandedHit||!this.supportAt(this.x,this.y))return;
+        this.vx=this.vy=0;this.isGrounded=true;this.wingSlide=0;
+        this.invalidateNavigation('AERIAL_LANDING',false);this.navFlightTarget=null;
+        this.setState('KING_WING_LAND',180);this.impactDust(30,19,0.22);
+        this.wingLandedHit=true;
+        this.wingEscapePlan=null;
+        if(this.wingCollision)return; // Un choque previo convierte el resto de la maniobra en recuperación física.
+        const x=kingClamp(this.x,player.x-12,player.x+12),y=kingClamp(this.y-8,player.y-55,player.y);
+        if(Math.hypot(x-this.x,y-(this.y-8))>105)return;
+        if([...platforms,...obstacles.filter(o=>!o.broken)].some(o=>segmentBoxHit(this.x,this.y-8,x,y,o)!==null))return;
+        const accepted=player.takeDamage(24,'GOBLIN_KING_WINGED');
+        if(accepted&&!isRunFinished()){player.vx=(Math.sign(player.x-this.x)||this.facing)*5;player.vy=-4;player.isGrounded=false;coyoteTimer=0;}
+      }
+      updateAerialHunt(dt) {
+        if(!this.currentState.startsWith('KING_WING_'))return false;
+        if(this.currentState==='KING_WING_PREP'){
+          if(this.actionTimer===0){
+            const plan=this.planAerialHunt();
+            if(!plan){this.wingCooldown=1200;this.setState('KING_WING_RECOVER',850);return true;}
+            this.wingPlan=plan;this.wingTarget={x:plan.x,y:plan.y};this.vx=plan.vx;this.vy=plan.vy;this.isGrounded=false;
+            this.wingCooldown=7200;this.wingFlapTimer=0;this.setState('KING_WING_TAKEOFF',100);this.impactDust(26,17,0.2);
+          }
+          return true;
+        }
+        if(this.currentState==='KING_WING_LAND'){if(this.actionTimer===0)this.setState('KING_WING_RECOVER',850);return true;}
+        if(this.currentState==='KING_WING_RECOVER'){
+          if(this.actionTimer===0){this.wingTarget=this.wingDiveTarget=this.wingPlan=null;this.wingDiveLocked=false;this.setState('KING_IDLE',0);}return true;
+        }
+        const step=dt/FIXED_STEP_MS;this.wingAirTime+=dt;this.vy+=this.gravity*step;
+        this.wingFlapTimer=Math.max(0,this.wingFlapTimer-dt);
+        if(['KING_WING_TAKEOFF','KING_WING_ASCEND'].includes(this.currentState)){
+          this.vy-=0.24*step; // La gravedad sigue superando la asistencia continua.
+          if(this.currentState==='KING_WING_TAKEOFF'&&this.actionTimer===0)this.setState('KING_WING_ASCEND');
+          if(this.y<=this.wingTarget.y){this.vy=Math.max(-1,this.vy);this.setState('KING_WING_HUNT',850);}
+        }else if(['KING_WING_HUNT','KING_WING_DIVE_PREP'].includes(this.currentState)){
+          if(this.wingFlapTimer===0){
+            this.wingFlapTimer=200;this.vy=Math.max(-3,this.vy-5.8);
+            if(this.currentState==='KING_WING_HUNT'){
+              const desired=kingClamp((this.playerSpatial.predictedX-this.x)/70,-4,4);
+              this.vx+=kingClamp(desired-this.vx,-0.7,0.7);
+            }
+          }
+          if(this.currentState==='KING_WING_HUNT'&&this.actionTimer===0){this.wingDiveTarget=this.chooseWingDiveTarget();this.setState('KING_WING_DIVE_PREP',420);}
+          if(this.currentState==='KING_WING_DIVE_PREP'){
+            if(!this.wingDiveLocked){this.wingDiveTarget=this.chooseWingDiveTarget();if(this.actionTimer<=240)this.wingDiveLocked=true;}
+            if(this.actionTimer===0){
+              const dx=this.wingDiveTarget.x-this.x,dy=Math.max(30,this.wingDiveTarget.y-this.y),length=Math.hypot(dx,dy);
+              this.vx=dx/length*12;this.vy=Math.max(7,dy/length*12);this.setState('KING_WING_DIVE');
+            }
+          }
+        }
+        if(this.wingAirTime>3600&&!this.wingEscapePlan){this.setState('KING_WING_DIVE');this.vy=Math.max(4,this.vy);}
+        if(this.wingSlide){
+          const side=this.moveBody(this.wingSlide*3*step,0);
+          if(side){
+            this.wingSlide*=-1;
+            if(++this.wingSlideBounces>=2){
+              // Encajonado sobre un apoyo estrecho: reutilizar una salida balística validada, sin nuevo ataque.
+              const escape=this.planLeap(this.x+this.wingSlide*160,groundY);
+              this.wingSlideBounces=0;
+              if(escape){this.wingEscapePlan=escape;this.wingEscapeStep=0;this.vy=escape.vy+this.gravity*step;this.wingSlide=0;}
+            }
+          }
+        }
+        if(this.wingEscapePlan)this.vx=++this.wingEscapeStep>this.wingEscapePlan.delay?this.wingEscapePlan.vx:0;
+        this.isGrounded=false;
+        const hit=this.moveBody(this.vx*step,Math.min(18,this.vy)*step);
+        if(hit){
+          this.wingEscapePlan=null;
+          if(hit.ny===-1&&hit.surface){
+            if(this.supportAt(this.x,this.y)){this.landWingPower();return true;}
+            this.isGrounded=false;this.vx=0;
+            if(!this.wingSlide){
+              const center=hit.surface.x+hit.surface.w/2;
+              const canSettle=this.supportAt(center,this.y)&&this.bodyClear(center,this.y)&&!this.sweepBody(this.x,this.y,center,this.y);
+              this.wingSlide=(canSettle?Math.sign(center-this.x):Math.sign(this.x-center))||this.facing;
+            }
+          }
+          this.wingCollision=true;
+          this.vy=Math.max(1,this.vy);this.setState('KING_WING_DIVE'); // Choque cancela control ofensivo: caer, nunca suspenderse.
+        }
+        return true;
+      }
       boneAnchor() { return this.localToWorld([25,-36]); }
       boneMuzzle() {
         const p=this.boneAnchor();return {x:p.x+Math.cos(this.boneAngle)*14*this.scale,y:p.y+Math.sin(this.boneAngle)*14*this.scale};
@@ -5953,6 +6099,12 @@
           add('RANGED_PRESSURE','BONE_SHOT',0.76+Math.min(0.16,s.dist/3000)+(s.above?0.12:0)+(s.speed<1?0.06:0)-(this.blocked?0.25:0),
             'ARCHER_READY + CLEAR_SHOT'+(s.above?' + ELEVATED_PLAYER':''));
         add('RECOVER','WAIT',0.08,'NO_USEFUL_COMMITMENT');
+        if(this.bossTraits.winged&&this.wingCooldown===0&&s.front&&s.dist>150&&(s.above||s.dist>600)&&this.planAerialHunt()){
+          const candidate=this.planLeap(player.x,player.y);
+          const leap=this.leapCooldown===0&&candidate&&Math.abs(candidate.y-player.y)<65&&Math.abs(candidate.x-player.x)<170;
+          add('AERIAL_INTERCEPT','AERIAL_HUNT',0.58+(s.above?.25:0)+Math.min(.1,Math.abs(this.playerSpatial.dy)/3500)+(leap?-.1:.16),
+            'WINGED_CLEARANCE + '+(leap?'ALTERNATIVE_INTERCEPT':'LEAP_LIMITED'));
+        }
         if(this.bossTraits.bomber&&this.bombCooldown===0&&(!this.volatileBomb||this.volatileBomb.dead)&&s.dist>180&&s.front&&this.planKingBombThrow())
           add('AREA_CONTROL','BOMB_THROW',0.7+Math.min(.18,this.bombStillTime/20000)+Math.min(.1,this.bombRegionTime/40000)+(s.above?.12:0)+Math.min(.08,s.dist/6000)-(this.blocked?.25:0),
             'VALID_ARC + ZONE_DENIAL'+(this.bombStillTime>1500?' + OBSERVED_STILLNESS':''));
@@ -5973,6 +6125,7 @@
         if(best.action==='GUARD'){this.guardCooldown=3000;this.rememberAction('GUARD');this.setState('KING_GUARD',750);return;}
         if(best.action==='BONE_SHOT'&&this.beginBoneShot())return;
         if(best.action==='BOMB_THROW'&&this.beginKingBomb())return;
+        if(best.action==='AERIAL_HUNT'&&this.beginAerialHunt())return;
         if(best.action==='CHUNK'&&this.beginChunkGrab())return;
         if(best.action==='REPOSITION'&&!s.front&&s.dist<155){this.setState('KING_IDLE',150);return;} // Giro existente de 280 ms, nunca instantáneo.
         if(best.action==='INTERCEPT'){
@@ -6068,6 +6221,12 @@
         const swing=active?kingEase(1-this.actionTimer/this.actionDuration):this.currentState==='KING_RECOVER'?1:0;
         const mix=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
         const pose={hand:[30,-7],elbow:[26,-25],offHand:[-27,-31],weaponAngle:0,lean:0,crouch:0};
+        if(this.currentState.startsWith('KING_WING_')){
+          const prep=this.currentState==='KING_WING_PREP',land=this.currentState==='KING_WING_LAND'||this.currentState==='KING_WING_RECOVER';
+          pose.crouch=prep?7*kingEase(1-this.actionTimer/550):land?5:-2;
+          pose.lean=this.currentState==='KING_WING_DIVE'?0.16:kingClamp(this.vx*.015,-.08,.08);
+          pose.hand=this.currentState==='KING_WING_DIVE'?[31,-12]:land?[25,-5]:[24,-32];pose.elbow=[23,-36];pose.offHand=[-25,-25];pose.weaponAngle=-.35;return pose;
+        }
         if(this.currentState.startsWith('KING_BOMB_')){
           const prep=this.currentState==='KING_BOMB_PREP',p=prep?kingEase(1-this.actionTimer/540):1;
           const detach=kingEase(kingClamp((p-.3)/.7,0,1));
@@ -6189,6 +6348,7 @@
       update(dt) {
         if(!this.isCombatReady())return;
         this.combatStarted=true;this.poseTime=simulationTime;
+        this.wingCooldown=Math.max(0,this.wingCooldown-dt);
         this.perceivePlayer(dt);
         this.observeKingSituation(dt);
         if(this.bossTraits.bomber){
@@ -6215,7 +6375,7 @@
         if(this.boneProjectile){this.boneProjectile.update(dt);if(this.boneProjectile?.dead)this.boneProjectile=null;if(isRunFinished())return;}
         if(this.blocked)this.blockedTimer+=dt;
         // Los impulsos heredados de habilidades no desplazan al Boss fuera de su física.
-        if(!['KING_LEAP','KING_DROP'].includes(this.currentState))this.vx=this.vy=0;
+        if(!['KING_LEAP','KING_DROP'].includes(this.currentState)&&!this.isWingAirborne())this.vx=this.vy=0;
         if(![this.x,this.y,this.vx,this.vy].every(Number.isFinite)) {
           const safe=BossEncounter.findSpace(Number.isFinite(this.x)?this.x:width/2);
           this.x=safe.x;this.y=safe.y;this.vx=this.vy=0;this.isGrounded=true;this.waves=[];
@@ -6223,9 +6383,10 @@
         }
         const threshold=this.nextDevourThreshold();
         if(!this.isRoyalRitual() && threshold!==null && this.hp<=this.maxHp*threshold &&
-          !['KING_LEAP','KING_DROP'].includes(this.currentState) && this.supportAt(this.x,this.y))this.beginRoyalDevour();
+          !['KING_LEAP','KING_DROP'].includes(this.currentState) && !this.isWingAirborne() && this.supportAt(this.x,this.y))this.beginRoyalDevour();
         if(this.isRoyalRitual()){
           if(this.boneTarget||this.boneProjectile)this.clearBonePower();
+          if(this.wingTarget){const cooldown=this.wingCooldown;this.clearWingPower();this.wingCooldown=cooldown;}
           if(this.bombTarget||this.volatileBomb)this.clearBombPower();
           this.actionTimer=Math.max(0,this.actionTimer-dt);
           this.updateRoyalDevour(dt);return;
@@ -6238,6 +6399,7 @@
         if(this.updateEnvironment(dt))return;
         if(this.updateBoneShot(dt))return;
         if(this.updateKingBomb(dt))return;
+        if(this.updateAerialHunt(dt))return;
         switch(this.currentState) {
           case 'KING_IDLE':
             if(this.actionTimer===0)this.decideAction();
@@ -6410,7 +6572,7 @@
             break;
         }
       }
-      stopCombat() {this.clearEnvironment();this.clearBombPower();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
+      stopCombat() {this.clearEnvironment();this.clearWingPower();this.clearBombPower();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
         if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
         this.navGraph=null;this.invalidateNavigation('RESIZE',false);
@@ -6432,7 +6594,7 @@
           this.leapPlan.vx*=ratioX;
         }
         for(const w of this.waves){w.x*=ratioX;w.y+=deltaY;}
-        if(['KING_LEAP','KING_DROP'].includes(this.currentState)){
+        if(['KING_LEAP','KING_DROP'].includes(this.currentState)||this.isWingAirborne()){
           this.vx*=ratioX;
           if(!this.bodyClear(this.x,this.y)){
             let safe=null;
@@ -6456,6 +6618,8 @@
         if(this.bombTarget){this.bombTarget.x*=ratioX;this.bombTarget.y+=deltaY;}
         if(this.bombPlan){this.bombPlan.x*=ratioX;this.bombPlan.y+=deltaY;const hand=this.kingBombHand();this.bombPlan.vx=(this.bombPlan.x-hand.x)/this.bombPlan.steps;this.bombPlan.vy=(this.bombPlan.y-hand.y-.28*this.bombPlan.steps*(this.bombPlan.steps+1)/2)/this.bombPlan.steps;}
         if(this.volatileBomb)this.volatileBomb.remapResize(ratioX,deltaY);
+        for(const target of [this.wingTarget,this.wingDiveTarget,this.wingPlan])if(target){target.x*=ratioX;target.y+=deltaY;}
+        if(this.wingEscapePlan){this.wingEscapePlan.x*=ratioX;this.wingEscapePlan.y+=deltaY;this.wingEscapePlan.vx*=ratioX;}
       }
       drawCombatWaves(c) {
         c.save();
@@ -6793,6 +6957,9 @@
           if(this.king) {
             const k=this.king;
             const navTarget=k.navFlightTarget||k.navExpected;
+            lines.push(`WINGED POWER: ${k.bossTraits.winged?'ON':'OFF'} | AERIAL: ${k.wingCooldown>0?(k.wingCooldown/1000).toFixed(1)+'s':'READY'} | AIR TIME: ${(k.wingAirTime/1000).toFixed(1)}s`,
+              `AERIAL STATE: ${k.currentState.startsWith('KING_WING_')?k.currentState:'NONE'} | AIR TARGET: ${k.wingTarget?k.wingTarget.x.toFixed(0)+' / '+k.wingTarget.y.toFixed(0):'NONE'}`,
+              `DIVE TARGET: ${k.wingDiveTarget?k.wingDiveTarget.x.toFixed(0)+' / '+k.wingDiveTarget.y.toFixed(0):'NONE'} | DIVE LOCK: ${k.wingDiveLocked?'YES':'NO'}`);
             lines.push(`BOMBER POWER: ${k.bossTraits.bomber?'ON':'OFF'} | BOMB: ${k.bombCooldown>0?(k.bombCooldown/1000).toFixed(1)+'s':'READY'} | ACTIVE BOMB: ${!!k.volatileBomb}`,
               `BOMB STATE: ${k.currentState.startsWith('KING_BOMB_')?k.currentState:k.volatileBomb?.state||'NONE'} | LOCK: ${k.bombLocked?'YES':'NO'} | TARGET: ${k.bombTarget?k.bombTarget.x.toFixed(0)+' / '+k.bombTarget.y.toFixed(0):'NONE'}`);
             lines.push(`ARCHER POWER: ${k.bossTraits.archer?'ON':'OFF'} | BONE SHOT: ${k.boneCooldown>0?(k.boneCooldown/1000).toFixed(1)+'s':'READY'}`,
