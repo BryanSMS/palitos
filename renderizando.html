@@ -4966,6 +4966,7 @@
         this.shamanHex=null;this.shamanSigil=null;this.shamanPulseCount=0;this.shamanPulseFlash=0;
         this.shamanRegion=null;this.shamanRegionTime=0;this.shamanStillTime=0;
         this.clearKingSynergies();
+        this.resetPlayerModel();
       }
       getHitboxes() {
         const s=this.scale;
@@ -5219,6 +5220,9 @@
       }
       isCombatReady() { return gameState==='PLAYING' && BossEncounter.active && BossEncounter.king===this && this.runId===currentRunId && !this.dead && !['KING_FORMING','KING_BREATH','KING_ROAR'].includes(this.currentState); }
       setState(state,duration=0) {
+        if(this.playerModel&&this.currentState?.endsWith('RECOVER')&&this.actionTimer===0&&state!==this.currentState&&!this.isRoyalRitual()){
+          this.modelRecoveryWindow=800;this.modelRecoveryPressure=false;
+        }
         // La recuperación física termina antes de esta pausa de decisión, no se acorta el telegraph.
         if(state==='KING_IDLE'&&['KING_RECOVER','KING_GUARD','KING_STAGGER','KING_LAND_RECOVER'].includes(this.currentState))duration=Math.min(duration,150);
         this.currentState=state;this.actionTimer=duration;this.actionDuration=duration;
@@ -5948,6 +5952,7 @@
         if(!active){this.synergyAction=null;this.synergyScore=0;this.synergyWhy='NONE';}
       }
       recordKingSynergy(option) {
+        this.rememberAdaptiveChoice(option);
         this.recentSynergies.push({action:option.action,family:this.synergyFamily(option.action),time:simulationTime});
         if(this.recentSynergies.length>5)this.recentSynergies.shift();
         this.synergyAction=option.action;this.synergyWhy=option.why;this.synergyScore=option.score;
@@ -6034,7 +6039,7 @@
         this.tacticalTimer=150;
         const options=this.buildKingSynergyOptions(s);
         options.push({intent:this.kingIntent,action:holdAction,score:.64,why:'CONTINUE_COMMITTED_MANEUVER'});
-        for(const o of options)o.score=this.scoreKingAction(o);
+        for(const o of options)o.score=this.scoreKingAction(o,s);
         options.sort((a,b)=>b.score-a.score);this.topKingOptions=options.slice(0,3);
         return options[0].action===holdAction?null:options[0];
       }
@@ -6466,7 +6471,97 @@
           predictedX:p.predictedX,grounded:player.isGrounded,jumping:player.vy<0,falling:player.vy>0,
           hp:this.hp/this.maxHp,poise:this.poise,region:this.spatialRegion(this.x,this.y),playerRegion:p.region};
       }
-      scoreKingAction(option) {
+      resetPlayerModel() {
+        this.playerModel={range:{CLOSE:0,MID:0,FAR:0},preferredRange:'NEUTRAL',platformCamping:0,frontalAggression:0,
+          postRecoveryAggression:0,flankFrequency:0,movementActivity:0,dodge:{LEFT:0,RIGHT:0,STAY:0,VERTICAL:0},
+          exposure:0,recoverySamples:0,confidence:{range:0,camping:0,frontal:0,postRecovery:0,flank:0,dodge:0}};
+        this.modelTimer=0;this.modelRegion=null;this.modelRegionTime=0;this.modelFront=null;this.modelFacing=this.facing;this.modelPlayerX=player.x;
+        this.modelRecoveryWindow=0;this.modelRecoveryPressure=false;this.modelLockMask=0;this.modelDodge=this.modelDodgeNext=null;
+        this.adaptiveChoice={base:0,bias:0,final:0,why:'INSUFFICIENT_OBSERVATIONS'};
+      }
+      observePlayerModel(dt) {
+        if(!this.isCombatReady()||dt<=0)return;
+        if(this.isRoyalRitual()){
+          this.modelDodge=this.modelDodgeNext=null;this.modelLockMask=0;this.modelRecoveryWindow=0;this.modelFront=null;return;
+        }
+        const p=this.playerSpatial,m=this.playerModel,near=Math.abs(p.dx)<200&&Math.abs(p.dy)<90;
+        // Un evento por lock real. Solo se mide desplazamiento YA ocurrido, nunca se corrige el tiro.
+        const mask=(this.boneLocked?1:0)|(this.bombLocked?2:0)|(this.wingDiveLocked?4:0)|
+          (this.shamanLocked&&this.shamanSpell==='HEX'?8:0)|(this.currentState==='KING_RAM_RUN'?16:0)|(this.aerialShotLocked?32:0);
+        if(mask&~this.modelLockMask){
+          const observation={x:player.x,y:player.y,timer:650};
+          // Aerial Shot y Dive pueden solaparse: máximo dos locks en esta ventana con el kit actual.
+          if(!this.modelDodge)this.modelDodge=observation;else this.modelDodgeNext=observation;
+        }
+        this.modelLockMask=mask;
+        this.modelDodge=this.sampleModelDodge(this.modelDodge,dt);
+        this.modelDodgeNext=this.sampleModelDodge(this.modelDodgeNext,dt);
+        if(this.modelRecoveryWindow>0){
+          this.modelRecoveryPressure ||= near&&player.attackAnim>0;
+          this.modelRecoveryWindow=Math.max(0,this.modelRecoveryWindow-dt);
+          if(this.modelRecoveryWindow===0){
+            m.postRecoveryAggression+=this.modelRecoveryPressure?1:0;m.recoverySamples++;
+          }
+        }
+        this.modelTimer+=dt;
+        if(this.modelTimer<250)return;
+        const elapsed=this.modelTimer;this.modelTimer=0;
+        const decay=Math.exp(-elapsed/20000),alpha=1-decay,front=p.dx*this.facing>=0;
+        m.exposure=m.exposure*decay+elapsed/1000;
+        const distance=Math.hypot(p.dx,p.dy),range=distance<180?'CLOSE':distance<450?'MID':'FAR';
+        for(const key of Object.keys(m.range))m.range[key]=m.range[key]*decay+(key===range?alpha:0);
+        if(this.modelRegion!==p.region){this.modelRegion=p.region;this.modelRegionTime=0;m.platformCamping*=.65;}
+        this.modelRegionTime+=elapsed;
+        // La región proviene de geometría actual de B2; AIR y GROUND no son camping en plataforma.
+        const camp=/^P\d+$/.test(p.region)&&player.isGrounded&&this.modelRegionTime>=2500&&Math.abs(player.vx)<1;
+        m.platformCamping=m.platformCamping*decay+(camp?alpha*(Math.abs(p.dy)>65?1:.35):0);
+        m.frontalAggression=m.frontalAggression*decay+(near&&front&&player.attackAnim>0?alpha:0);
+        m.movementActivity=m.movementActivity*decay+alpha*kingClamp(Math.abs(player.vx)/4,0,1);
+        m.flankFrequency*=decay;
+        if(near&&this.modelFront===true&&!front&&this.modelFacing===this.facing&&Math.abs(player.x-this.modelPlayerX)>12)m.flankFrequency++;
+        this.modelFront=near?front:null;this.modelFacing=this.facing;this.modelPlayerX=player.x;
+        m.postRecoveryAggression*=decay;m.recoverySamples*=decay;
+        for(const key of Object.keys(m.dodge))m.dodge[key]*=decay;
+        const confidence=(samples)=>kingClamp((samples-1)/4,0,1),timeConfidence=kingClamp((m.exposure-1)/7,0,1);
+        m.confidence={range:timeConfidence,camping:timeConfidence,frontal:timeConfidence,
+          postRecovery:confidence(m.recoverySamples),flank:confidence(m.flankFrequency),dodge:confidence(Object.values(m.dodge).reduce((a,b)=>a+b,0))};
+        m.preferredRange=timeConfidence<.2?'NEUTRAL':Object.keys(m.range).reduce((a,b)=>m.range[a]>=m.range[b]?a:b);
+      }
+      sampleModelDodge(d,dt) {
+        if(!d)return null;
+        d.timer-=dt;if(d.timer>0)return d;
+        const dx=player.x-d.x,dy=player.y-d.y;
+        const key=Math.abs(dy)>45&&Math.abs(dy)>Math.abs(dx)?'VERTICAL':Math.abs(dx)>30?(dx<0?'LEFT':'RIGHT'):'STAY';
+        this.playerModel.dodge[key]++;return null;
+      }
+      adaptiveUtilityBias(option,s) {
+        if(this.isRoyalRitual()||!this.isCombatReady())return {bias:0,why:'INACTIVE'};
+        const m=this.playerModel,c=m.confidence,a=option.action,reasons=[];
+        const total=Object.values(m.range).reduce((x,y)=>x+y,0)||1;
+        let bias=0;
+        const add=(value,why)=>{if(Math.abs(value)>.001){bias+=value;reasons.push(why);}};
+        if(s.dist>200&&['NAVIGATE','INTERCEPT','BONE_SHOT','HEX','BOMB_THROW','VOLATILE_BOLT'].includes(a))
+          add(.07*m.range.FAR/total*c.range,'PREFERRED_FAR');
+        if(s.level&&s.dist<200&&['WEAPON_SWEEP','GROUND_CRUSH','GUARD','RUNIC_BULWARK','REPOSITION'].includes(a))
+          add(.06*m.range.CLOSE/total*c.range,'PREFERRED_CLOSE');
+        if(s.above&&['BOMB_THROW','SIGIL','AERIAL_HUNT','ROYAL_METEOR','BONE_SHOT'].includes(a))
+          add(.10*m.platformCamping*c.camping,'PLATFORM_CAMPING');
+        if(s.front&&s.dist<200&&['GUARD','RUNIC_BULWARK','GUARD_COUNTER'].includes(a))
+          add(.09*m.frontalAggression*c.frontal,'FRONTAL_AGGRESSION');
+        if(this.modelRecoveryWindow>0&&s.dist<220&&['GUARD','RUNIC_BULWARK','REPOSITION'].includes(a))
+          add(.09*m.postRecoveryAggression/Math.max(1,m.recoverySamples)*c.postRecovery,'POST_RECOVERY_PRESSURE');
+        if(s.dist<200&&['REPOSITION','WEAPON_SWEEP'].includes(a))add(.08*c.flank,'OBSERVED_FLANKS');
+        if(!s.front&&['HEAVY_FIST','ROYAL_RAM','BONE_SHOT','VOLATILE_BOLT'].includes(a))add(-.08*c.flank,'FRONT_COMMITMENT_UNSUITABLE');
+        const dodges=Object.values(m.dodge).reduce((x,y)=>x+y,0)||1;
+        const lateral=Math.max(m.dodge.LEFT,m.dodge.RIGHT)/dodges*c.dodge;
+        if(s.dist>180&&['BOMB_THROW','SIGIL','VOLATILE_BOLT'].includes(a))add(.06*lateral,'REPEATED_LATERAL_DODGE');
+        if(['BONE_SHOT','HEX'].includes(a))add(-.04*lateral,'PROJECTILE_DODGE_HISTORY');
+        return {bias:kingClamp(bias,-.12,.12),why:reasons.join(' + ')||(Object.values(c).some(v=>v>.2)?'CURRENT_CONTEXT_DOMINATES':'INSUFFICIENT_OBSERVATIONS')};
+      }
+      rememberAdaptiveChoice(option) {
+        this.adaptiveChoice={base:option.baseScore??option.score,bias:option.adaptiveBias||0,final:option.score,why:option.adaptiveWhy||'NONE'};
+      }
+      scoreKingAction(option,s=null) {
         let score=option.score;
         if(option.intent==='SYNERGY'){
           const family=this.synergyFamily(option.action);
@@ -6478,7 +6573,11 @@
           score-=0.045*(i+1)/this.kingActionHistory.length;
         if(this.kingIntent===option.intent)score+=0.035; // Hysteresis, sin azar ni cambios por render.
         if(option.intent==='GUARD'&&this.recentIntents.slice(-3).includes('GUARD'))score-=0.12;
-        return kingClamp(score,0,1);
+        const p=this.playerSpatial;
+        s ||= {dist:Math.abs(p.dx),front:p.dx*this.facing>=0,level:Math.abs(p.dy)<65,above:p.dy< -65};
+        const adaptive=this.adaptiveUtilityBias(option,s),base=kingClamp(score,0,1),final=kingClamp(score+adaptive.bias,0,1);
+        option.baseScore=base;option.adaptiveBias=final-base;option.adaptiveWhy=adaptive.why;
+        return final;
       }
       buildKingOptions(s) {
         const options=[],add=(intent,action,score,why)=>options.push({intent,action,score,why});
@@ -6528,7 +6627,7 @@
             add('ZONE_CONTROL','SIGIL',.55+Math.min(.22,this.shamanStillTime/15000)+Math.min(.12,this.shamanRegionTime/25000)+(s.above?.1:0)-(this.shamanRegionTime<500?.2:0),'SURFACE_TARGET + SHORT_TERM_STILLNESS');
         }
         options.push(...this.buildKingSynergyOptions(s));
-        for(const option of options)option.score=this.scoreKingAction(option);
+        for(const option of options)option.score=this.scoreKingAction(option,s);
         return options.sort((a,b)=>b.score-a.score);
       }
       selectKingAction() {
@@ -6537,6 +6636,7 @@
         this.tacticalTimer=150;this.tacticalEvaluations++;
         const s=this.evaluateTacticalSituation(),options=this.buildKingOptions(s),best=options[0];
         this.topKingOptions=options.slice(0,3);
+        this.rememberAdaptiveChoice(best);
         if(this.currentState==='KING_ADVANCE'&&['NAVIGATE','INTERCEPT','REPOSITION'].includes(best.action)&&this.kingIntent===best.intent)return;
         this.lastIntent=this.kingIntent;this.kingIntent=best.intent;this.intentScore=best.score;this.tacticalWhy=best.why;
         if(this.recentIntents.at(-1)!==best.intent){this.recentIntents.push(best.intent);if(this.recentIntents.length>5)this.recentIntents.shift();}
@@ -6558,6 +6658,7 @@
           if(this.navigateToPlayer()){
             if(['KING_OBSTACLE_SMASH','KING_PLATFORM_BREAK_PREP'].includes(this.currentState)){
               this.kingIntent='BREAK_OBSTACLE';this.tacticalWhy=this.navWhy;this.intentScore=0.93;
+              this.adaptiveChoice={base:.93,bias:0,final:.93,why:'B2_CONFIRMED_BLOCKAGE'};
               if(this.recentIntents.at(-1)!=='BREAK_OBSTACLE'){this.recentIntents.push('BREAK_OBSTACLE');if(this.recentIntents.length>5)this.recentIntents.shift();}
             }
             return;
@@ -6789,6 +6890,7 @@
         this.syncKingSynergyState();
         this.wingCooldown=Math.max(0,this.wingCooldown-dt);
         this.perceivePlayer(dt);
+        this.observePlayerModel(dt);
         this.observeKingSituation(dt);
         for(const key of ['shamanHealCooldown','shamanHexCooldown','shamanSigilCooldown','shamanGlobalCooldown','shamanPulseFlash'])this[key]=Math.max(0,this[key]-dt);
         if(this.bossTraits.shaman){
@@ -7038,6 +7140,9 @@
       }
       stopCombat() {this.clearEnvironment();this.clearKingSynergies();this.recentSynergies=[];this.clearShamanPower();this.clearWingPower();this.clearBombPower();this.clearBonePower();this.tacticalTimer=this.intentCommit=this.decisionWait=0;this.topKingOptions=[];this.recentIntents=[];this.kingIntent='RECOVER';this.waves=[];this.vx=this.vy=this.flightVy=0;this.leapPlan=null;this.airSlideDirection=0;this.airSlideBounces=0;this.tribute=null;this.ritualMotes=[];this.devourNoticeTimer=0;this.dropPlan=null;this.dropRecoveryLeap=false;this.targetKingObstacle=null;this.smashPhase='NONE';this.actionTimer=this.actionDuration=this.navigationRetryTimer=this.blockedTimer=0;this.burstRemaining=this.burstCooldown=this.comboCount=0;this.navRoute=[];this.navExpected=this.navFlightTarget=this.navGraph=this.navSnapshot=null;this.navRecentRegions=[];this.navDirection=0;this.navPursuitLanding=false;this.navMode='STOPPED';this.navPlanTimer=0;}
       remapCombatResize(ratioX,deltaY) {
+        if(this.modelDodge){this.modelDodge.x*=ratioX;this.modelDodge.y+=deltaY;}
+        if(this.modelDodgeNext){this.modelDodgeNext.x*=ratioX;this.modelDodgeNext.y+=deltaY;}
+        this.modelFront=null;this.modelPlayerX*=ratioX; // El resize no es un flanqueo observado.
         if(this.navFlightTarget)this.navFlightTarget={...this.navFlightTarget,x:this.navFlightTarget.x*ratioX,y:this.navFlightTarget.y+deltaY};
         this.navGraph=null;this.invalidateNavigation('RESIZE',false);
         this.burstRemaining*=ratioX;
@@ -7442,6 +7547,11 @@
               `BOMB STATE: ${k.currentState.startsWith('KING_BOMB_')?k.currentState:k.volatileBomb?.state||'NONE'} | LOCK: ${k.bombLocked?'YES':'NO'} | TARGET: ${k.bombTarget?k.bombTarget.x.toFixed(0)+' / '+k.bombTarget.y.toFixed(0):'NONE'}`);
             lines.push(`ARCHER POWER: ${k.bossTraits.archer?'ON':'OFF'} | BONE SHOT: ${k.boneCooldown>0?(k.boneCooldown/1000).toFixed(1)+'s':'READY'}`,
               `BONE TARGET: ${k.boneTarget?k.boneTarget.x.toFixed(0)+' / '+k.boneTarget.y.toFixed(0):'NONE'} | BONE LOCK: ${k.boneLocked?'YES':'NO'}`);
+            const model=k.playerModel,confidence=model.confidence,adaptive=k.adaptiveChoice;
+            lines.push(`ADAPTIVE MODEL | RANGE: ${model.preferredRange} | CAMPING: ${model.platformCamping.toFixed(2)} | ACTIVITY: ${model.movementActivity.toFixed(2)}`,
+              `FRONTAL AGG: ${model.frontalAggression.toFixed(2)} | POST-RECOVERY: ${(model.postRecoveryAggression/Math.max(1,model.recoverySamples)).toFixed(2)} | FLANK: ${model.flankFrequency.toFixed(1)}`,
+              `DODGE L/R: ${model.dodge.LEFT.toFixed(1)} / ${model.dodge.RIGHT.toFixed(1)} | CONFIDENCE range/camp/front/post/flank/dodge: ${Object.values(confidence).map(v=>v.toFixed(2)).join('/')}`,
+              `BASE: ${adaptive.base.toFixed(2)} | ADAPTIVE BIAS: ${adaptive.bias>=0?'+':''}${adaptive.bias.toFixed(2)} | FINAL: ${adaptive.final.toFixed(2)} | WHY: ${adaptive.why}`);
             lines.push(`KING AI: ${k.kingIntent} ${k.intentScore.toFixed(2)} | WHY: ${k.tacticalWhy}`,
               `TOP: ${k.topKingOptions.map(o=>o.intent+'/'+o.action+' '+o.score.toFixed(2)).join(' | ')}`,
               `DECISION LATENCY: ${Math.round(k.decisionLatency)}ms | COMMIT: ${Math.round(k.intentCommit)}ms`,
